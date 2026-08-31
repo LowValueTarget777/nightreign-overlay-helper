@@ -1,11 +1,11 @@
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QEvent
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal, QPoint, QEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QSlider, QGroupBox, QCheckBox, QPushButton,
     QMessageBox, QApplication, QFrame, QComboBox, QToolTip, 
     QLineEdit, QScrollArea, QSpinBox,
 )
-from PyQt6.QtGui import QPixmap, QIcon, QMouseEvent, QEnterEvent
+from PyQt6.QtGui import QDesktopServices, QPixmap, QIcon, QMouseEvent, QEnterEvent
 import yaml
 from dataclasses import dataclass, asdict
 import os
@@ -24,7 +24,8 @@ from src.config import Config
 from src.ui.overlay import OverlayUIState, OverlayWidget
 from src.ui.map_overlay import MapOverlayWidget, MapOverlayUIState
 from src.ui.p2p_overlay import P2POverlayWidget, P2POverlayUIState
-from src.p2p import P2PService, P2PStatus
+from src.p2p import P2PService, P2PStatus, SteamPlaytimeService
+from src.p2p.playtime import STEAM_API_KEY_URL
 from src.ui.input import InputWorker, InputSettingWidget, InputSetting
 from src.ui.capture_region import CaptureRegionWindow
 from src.detector.rain_detector import RainDetector
@@ -562,7 +563,7 @@ class SettingsWindow(QWidget):
         open_log_and_abouts_layout.addWidget(abouts_button)
 
     def init_p2p_group(self):
-        self.p2p_group = QGroupBox("队友延迟")
+        self.p2p_group = QGroupBox("队友信息")
         layout = QVBoxLayout(self.p2p_group)
 
         self.p2p_enabled_checkbox = QCheckBox("启用队友延迟显示")
@@ -604,6 +605,49 @@ class SettingsWindow(QWidget):
         self.p2p_warning_ping_spinbox.valueChanged.connect(self.update_p2p_thresholds)
         thresholds_layout.addWidget(self.p2p_warning_ping_spinbox)
         layout.addLayout(thresholds_layout)
+
+        self.playtime_enabled_checkbox = QCheckBox("显示队友《黑夜君临》游戏时长")
+        self.playtime_enabled_checkbox.setChecked(False)
+        self.playtime_enabled_checkbox.stateChanged.connect(self.update_playtime_enabled)
+        layout.addWidget(self.playtime_enabled_checkbox)
+
+        self.playtime_hint = QLabel("默认关闭；仅能查询公开了游戏详情的玩家")
+        self.playtime_hint.setWordWrap(True)
+        self.playtime_hint.setStyleSheet("color: gray;")
+        layout.addWidget(self.playtime_hint)
+
+        key_layout = QHBoxLayout()
+        self.steam_api_key_input = QLineEdit()
+        self.steam_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.steam_api_key_input.setMaxLength(64)
+        self.steam_api_key_input.setPlaceholderText(
+            "API Key 已使用 Windows 加密保存"
+            if self.playtime_service.has_api_key
+            else "输入自己的 Steam Web API Key"
+        )
+        self.steam_api_key_input.returnPressed.connect(self.save_steam_api_key)
+        key_layout.addWidget(self.steam_api_key_input)
+        self.save_key_button = QPushButton("保存")
+        self.save_key_button.setStyleSheet(BUTTON_STYLE)
+        self.save_key_button.clicked.connect(self.save_steam_api_key)
+        key_layout.addWidget(self.save_key_button)
+        layout.addLayout(key_layout)
+
+        key_buttons_layout = QHBoxLayout()
+        self.get_key_button = QPushButton("获取 Steam Web API Key")
+        self.get_key_button.setStyleSheet(BUTTON_STYLE)
+        self.get_key_button.clicked.connect(self.open_steam_api_key_page)
+        key_buttons_layout.addWidget(self.get_key_button)
+        self.clear_key_button = QPushButton("清除已保存 Key")
+        self.clear_key_button.setStyleSheet(BUTTON_STYLE)
+        self.clear_key_button.clicked.connect(self.clear_steam_api_key)
+        key_buttons_layout.addWidget(self.clear_key_button)
+        layout.addLayout(key_buttons_layout)
+
+        self.playtime_status_label = QLabel("游戏时长查询已关闭")
+        self.playtime_status_label.setWordWrap(True)
+        layout.addWidget(self.playtime_status_label)
+        self._set_playtime_controls_visible(False)
 
         position_button = QPushButton("重置队友延迟悬浮窗位置")
         position_button.setStyleSheet(BUTTON_STYLE)
@@ -773,8 +817,12 @@ class SettingsWindow(QWidget):
             load_slider_value(self.p2p_opacity_slider, data.get("p2p_opacity", 75))
             self.p2p_good_ping_spinbox.setValue(data.get("p2p_good_ping", 80))
             self.p2p_warning_ping_spinbox.setValue(data.get("p2p_warning_ping", 150))
+            self.playtime_enabled_checkbox.blockSignals(True)
+            self.playtime_enabled_checkbox.setChecked(data.get("p2p_playtime_enabled", False))
+            self.playtime_enabled_checkbox.blockSignals(False)
             self.update_p2p_enabled()
             self.update_p2p_thresholds()
+            self.update_playtime_enabled()
             p2p_x = data.get("p2p_x")
             p2p_y = data.get("p2p_y")
             if p2p_x is None or p2p_y is None:
@@ -858,6 +906,7 @@ class SettingsWindow(QWidget):
                 "p2p_y": self.p2p_overlay.y(),
                 "p2p_good_ping": self.p2p_good_ping_spinbox.value(),
                 "p2p_warning_ping": self.p2p_warning_ping_spinbox.value(),
+                "p2p_playtime_enabled": self.playtime_enabled_checkbox.isChecked(),
                 # 自动计时
                 "dayx_detect_enabled": self.dayx_detect_enable_checkbox.isChecked(),
                 "in_rain_detect_enabled": self.in_rain_detect_enable_checkbox.isChecked(),
@@ -944,6 +993,7 @@ class SettingsWindow(QWidget):
         input: InputWorker,
         p2p_overlay: P2POverlayWidget,
         p2p_service: P2PService,
+        playtime_service: SteamPlaytimeService,
     ):
         super().__init__()
         config = Config.get()
@@ -953,8 +1003,10 @@ class SettingsWindow(QWidget):
         self.update_map_overlay_ui_state_signal.connect(map_overlay.update_ui_state)
         self.p2p_overlay = p2p_overlay
         self.p2p_service = p2p_service
+        self.playtime_service = playtime_service
         self.update_p2p_overlay_ui_state_signal.connect(p2p_overlay.update_ui_state)
         self.p2p_service.status_changed.connect(self.update_p2p_status_display)
+        self.playtime_service.status_changed.connect(self.update_playtime_status_display)
         self.updater = updater
         self.input = input
 
@@ -1481,6 +1533,61 @@ class SettingsWindow(QWidget):
             good_ping=good_ping,
             warning_ping=warning_ping,
         ))
+
+    def update_playtime_enabled(self, state=None):
+        enabled = self.playtime_enabled_checkbox.isChecked()
+        self._set_playtime_controls_visible(enabled)
+        self.playtime_service.set_enabled(enabled)
+        self.update_p2p_overlay_ui_state_signal.emit(
+            P2POverlayUIState(show_playtime=enabled)
+        )
+        info(f"Steam playtime display enabled: {enabled}")
+        # Loading calls this method without a state after all saved values have
+        # been applied. A real checkbox change carries a state and should be
+        # persisted immediately, so an unexpected exit cannot lose the choice.
+        if state is not None:
+            self.save_settings()
+
+    def _set_playtime_controls_visible(self, visible: bool):
+        for widget in (
+            self.playtime_hint,
+            self.steam_api_key_input,
+            self.save_key_button,
+            self.get_key_button,
+            self.clear_key_button,
+            self.playtime_status_label,
+        ):
+            widget.setVisible(visible)
+
+    def open_steam_api_key_page(self):
+        QDesktopServices.openUrl(QUrl(STEAM_API_KEY_URL))
+
+    def save_steam_api_key(self):
+        key = self.steam_api_key_input.text().strip()
+        try:
+            self.playtime_service.save_api_key(key)
+        except ValueError as exc:
+            warning_box(str(exc), self)
+            return
+        except Exception as exc:
+            error(f"Failed to save Steam Web API key: {exc}")
+            error_box("无法安全保存 Steam Web API Key，请检查日志。", self)
+            return
+        self.steam_api_key_input.clear()
+        self.steam_api_key_input.setPlaceholderText("API Key 已使用 Windows 加密保存")
+
+    def clear_steam_api_key(self):
+        try:
+            self.playtime_service.clear_api_key()
+        except OSError as exc:
+            error(f"Failed to remove the encrypted Steam Web API key: {exc}")
+            error_box("无法清除已保存的 Steam Web API Key，请检查日志。", self)
+            return
+        self.steam_api_key_input.clear()
+        self.steam_api_key_input.setPlaceholderText("输入自己的 Steam Web API Key")
+
+    def update_playtime_status_display(self, message: str):
+        self.playtime_status_label.setText(f"游戏时长：{message}")
 
     def update_p2p_status_display(self, status: P2PStatus):
         helper_ok = status.state not in {"disabled", "helper_missing", "helper_error"}

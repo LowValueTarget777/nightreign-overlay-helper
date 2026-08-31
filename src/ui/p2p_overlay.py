@@ -4,10 +4,18 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QMouseEvent
-from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGridLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.logger import info
 from src.p2p.models import P2PPeer, P2PStatus
+from src.p2p.playtime import PlaytimeResult, format_playtime
 from src.ui.utils import set_widget_always_on_top
 
 
@@ -35,6 +43,7 @@ class P2POverlayUIState:
     is_setting_opened: bool | None = None
     good_ping: int | None = None
     warning_ping: int | None = None
+    show_playtime: bool | None = None
 
 
 class P2POverlayWidget(QWidget):
@@ -55,6 +64,7 @@ class P2POverlayWidget(QWidget):
         self.scale = 1.0
         self.good_ping = 80
         self.warning_ping = 150
+        self.show_playtime = False
         self.draggable = False
         self.drag_position = QPoint()
         self.only_show_when_game_foreground = False
@@ -63,6 +73,7 @@ class P2POverlayWidget(QWidget):
         self.is_setting_opened = False
         self.status = P2PStatus("waiting_for_game", "等待 nightreign.exe")
         self.peers: list[P2PPeer] = []
+        self.playtimes: dict[str, PlaytimeResult] = {}
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -105,6 +116,10 @@ class P2POverlayWidget(QWidget):
         self.peers = list(peers)
         self._refresh_rows()
 
+    def set_playtimes(self, playtimes: dict[str, PlaytimeResult]):
+        self.playtimes = dict(playtimes)
+        self._refresh_rows()
+
     def set_game_foreground(self, is_foreground: bool):
         self.update_ui_state(P2POverlayUIState(is_game_foreground=is_foreground))
 
@@ -131,6 +146,13 @@ class P2POverlayWidget(QWidget):
             self.good_ping = state.good_ping
         if state.warning_ping is not None:
             self.warning_ping = state.warning_ping
+        if state.show_playtime is not None:
+            self.show_playtime = state.show_playtime
+            self.title_label.setText(
+                "联机状态 · Ping / 稳定度 / 时长"
+                if self.show_playtime else "联机状态 · Ping / 稳定度"
+            )
+            self.setFixedWidth(int((400 if self.show_playtime else 310) * self.scale))
         self._refresh_rows()
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -162,7 +184,8 @@ class P2POverlayWidget(QWidget):
 
     def _apply_scale(self, scale: float):
         self.scale = max(0.5, min(2.0, scale))
-        self.setFixedWidth(int(310 * self.scale))
+        base_width = 400 if self.show_playtime else 310
+        self.setFixedWidth(int(base_width * self.scale))
         self.title_label.setStyleSheet(
             f"color: white; font-size: {int(15 * self.scale)}px; font-weight: 600;"
         )
@@ -223,6 +246,18 @@ class P2POverlayWidget(QWidget):
             self.peer_grid.addWidget(name_label, row, 0)
             self.peer_grid.addWidget(ping_label, row, 1)
             self.peer_grid.addWidget(quality_label, row, 2)
+
+            if self.show_playtime:
+                result = self.playtimes.get(peer.steam_id, PlaytimeResult("loading"))
+                playtime_label = QLabel(format_playtime(result))
+                playtime_label.setAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                playtime_label.setToolTip(result.message)
+                playtime_label.setStyleSheet(
+                    f"color: #d8d8d8; font-size: {font_size}px;"
+                )
+                self.peer_grid.addWidget(playtime_label, row, 3)
 
         self.peer_grid.setColumnStretch(0, 1)
         self.adjustSize()
