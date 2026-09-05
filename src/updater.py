@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import time
 from enum import Enum
 from PIL import Image
@@ -315,10 +315,12 @@ class Updater(QObject):
                 map_pattern_match_text="",
             ))
 
-    def update_map_overlay_images(self, images: list[Image.Image] | None, earth_shifting: int | None = None):
+    def update_map_overlay_images(self, images: list[Image.Image] | None, earth_shifting: int | None = None,
+                                  candidate_ids=None, preserve_selection=False):
         if images is None:
             self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(
                 clear_image=True,
+                preserve_selection=preserve_selection,
                 map_pattern_match_time=0,
                 map_pattern_matching=False,
                 display_crystal_layout=False,
@@ -327,6 +329,8 @@ class Updater(QObject):
         else:
             self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(
                 overlay_images=images,
+                candidate_ids=candidate_ids,
+                preserve_selection=preserve_selection,
                 x=self.map_region[0],
                 y=self.map_region[1],
                 w=self.map_region[2],
@@ -377,7 +381,7 @@ class Updater(QObject):
             self.last_map_pattern_match_time = self.get_time()
         if self.do_match_map_pattern_flag == DoMatchMapPatternFlag.PREPARE:
             self.do_match_map_pattern_flag = DoMatchMapPatternFlag.TRUE
-            self.update_map_overlay_images(None)
+            self.update_map_overlay_images(None, preserve_selection=True)
             return
         if not is_full_map or self.do_match_map_pattern_flag != DoMatchMapPatternFlag.TRUE:
             return
@@ -388,7 +392,9 @@ class Updater(QObject):
         ))).map_detect_result
         self.partial_map_message = result.inference_message or "地图推测：等待探索"
         info(self.partial_map_message)
-        self.update_map_overlay_images(result.overlay_images or None)
+        self.update_map_overlay_images(result.overlay_images or None,
+                                       candidate_ids=[p.id for p in result.patterns or []],
+                                       preserve_selection=True)
         self.last_map_pattern_match_time = self.get_time()
         self.update_overlay_match_map_pattern_text()
 
@@ -400,6 +406,7 @@ class Updater(QObject):
         if self._reset_partial_requested:
             self._reset_partial_requested = False
             self.detector.map_detector.partial_inference = None
+            self.update_map_overlay_images(None)
             self.partial_map_message = "地图推测：等待探索"
             self.set_to_detect_map_pattern_once()
         if not self.map_detect_enabled:
@@ -603,6 +610,8 @@ class Updater(QObject):
             self.detect_and_update_hp,
             self.detect_and_update_art,
         ]:
+            if QThread.currentThread().isInterruptionRequested():
+                return
             try:
                 detect_fn()
             except ScreencapRuntimeError as e:
@@ -637,13 +646,19 @@ class Updater(QObject):
             last_detect_time = 0
             last_init_warning_time = 0.0
             last_init_warning_code = None
-            while self._running:
+            active_mode = self.screencap_mode
+            next_init_time = 0.0
+            while self._running and not QThread.currentThread().isInterruptionRequested():
                 start_time = self.get_time()
 
                 engine = get_engine()
-                if engine.status != EngineStatus.CONNECTED:
+                if active_mode != self.screencap_mode:
+                    engine.shutdown()
+                    active_mode = self.screencap_mode
+                    next_init_time = 0.0
+                if engine.status != EngineStatus.CONNECTED and time.monotonic() >= next_init_time:
                     try:
-                        engine.initialize(self.screencap_mode)
+                        engine.initialize(active_mode)
                     except ScreencapInitError as e:
                         now = self.get_time()
                         expected_wait = e.code in {"window_not_found", "game_not_ready"}
@@ -655,13 +670,18 @@ class Updater(QObject):
                             warning(f"ScreencapEngine init failed: {e}. Skipping this cycle.")
                             last_init_warning_time = now
                             last_init_warning_code = e.code
-                        time.sleep(Config.get().update_interval)
-                        continue
+                        next_init_time = time.monotonic() + 1.0
+
+                capture_ready = engine.status == EngineStatus.CONNECTED
+                if not capture_ready:
+                    self.hide_map_overlay()
+                    self.current_is_full_map = False
+                    self.hp_overlay_ui_state_signal.emit(HpOverlayUIState(visible=False))
 
                 is_game_foreground = self.check_game_foreground()
 
                 if self.get_time() - last_detect_time > self.detect_interval:
-                    if not self.only_detect_when_game_foreground or is_game_foreground:
+                    if capture_ready and (not self.only_detect_when_game_foreground or is_game_foreground):
                         self.detect_and_update_all()
                     last_detect_time = self.get_time()
 
@@ -689,7 +709,12 @@ class Updater(QObject):
 
         except Exception as e:
             error(f"Exception in updater run: {e}")
-            raise e
+        finally:
+            self._running = False
+            try:
+                get_engine().shutdown()
+            except Exception as e:
+                warning(f"Unable to shut down capture worker cleanly: {e}")
         info("Updater stopped.")
 
     def stop(self):

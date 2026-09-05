@@ -29,6 +29,8 @@ class MapOverlayUIState:
     opacity: float | None = None
     visible: bool | None = None
     overlay_images: list[Image.Image] | None = None
+    candidate_ids: list[int] | None = None
+    preserve_selection: bool = False
     display_crystal_layout: bool | None = None
     clear_image: bool = False
     map_pattern_matching: bool | None = None
@@ -119,9 +121,18 @@ class MapOverlayWidget(QWidget):
         ))
 
 
-    def set_overlay_images(self, imgs: list[Image.Image] | None):
+    def set_overlay_images(self, imgs: list[Image.Image] | None, candidate_ids=None, preserve_selection=False):
+        old_ids = getattr(self, "_candidate_ids", [])
+        selected = getattr(self, "_selected_candidate_id", None)
+        if preserve_selection and old_ids and self.map_pattern_idx is not None:
+            if 0 <= self.map_pattern_idx < len(old_ids):
+                selected = old_ids[self.map_pattern_idx]
+        if not preserve_selection:
+            selected = None
+        self._candidate_ids = candidate_ids or []
+        self._selected_candidate_id = selected
         self.overlay_images = imgs
-        self.map_pattern_idx = 0
+        self.map_pattern_idx = self._candidate_ids.index(selected) if selected in self._candidate_ids else 0
         self.update_overlay_images()
         
     def update_overlay_images(self):
@@ -255,9 +266,9 @@ class MapOverlayWidget(QWidget):
         if state.visible is not None:
             self.visible = state.visible
         if state.overlay_images is not None:
-            self.set_overlay_images(state.overlay_images)
+            self.set_overlay_images(state.overlay_images, state.candidate_ids, state.preserve_selection)
         if state.clear_image:
-            self.set_overlay_images(None)
+            self.set_overlay_images(None, preserve_selection=state.preserve_selection)
         if state.only_show_when_game_foreground is not None:
             self.only_show_when_game_foreground = state.only_show_when_game_foreground
         if state.is_game_foreground is not None:

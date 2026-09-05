@@ -1,5 +1,5 @@
 import pygame
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from pynput import keyboard, mouse
 from PyQt6.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QDialog, 
                              QLabel, QHBoxLayout)
@@ -183,7 +183,7 @@ class InputWorker(QObject):
         info("Pynput mouse listener started in worker thread.")
 
         # Pygame 事件循环
-        while self._running:
+        while self._running and not QThread.currentThread().isInterruptionRequested():
             try:
                 self._scan_joysticks()
 

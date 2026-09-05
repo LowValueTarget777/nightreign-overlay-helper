@@ -151,19 +151,17 @@ if __name__ == "__main__":
         playtime_service.stop()
         p2p_service.stop()
         updater.stop()
-        updater_thread.quit()
-        if not updater_thread.wait(1000):
-            print("Updater thread did not exit in time. Forcing termination.")
-            updater_thread.terminate()
-        else:
-            info("Updater thread stopped.")
         input.stop()
+        updater_thread.requestInterruption()
+        input_thread.requestInterruption()
+        updater_thread.quit()
         input_thread.quit()
-        if not input_thread.wait(1000):
-            print("Input thread did not exit in time. Forcing termination.")
-            input_thread.terminate()
-        else:
-            info("Input thread stopped.")
+        # Never kill a worker inside a native capture/matching call. Wait for
+        # cooperative completion before releasing any of its resources.
+        for name, thread in (("Updater", updater_thread), ("Input", input_thread)):
+            while not thread.wait(1000):
+                warning(f"Waiting for {name} worker to finish safely.")
+            info(f"{name} thread stopped.")
         info("All Thread stopped.")
 
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import codecs
 from pathlib import Path
 import sys
 
@@ -47,6 +48,7 @@ class P2PService(QObject):
         self.status = P2PStatus("disabled", "联机信息已关闭")
         self.peers: list[P2PPeer] = []
         self._line_buffer = JsonLineBuffer()
+        self._stdout_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._stopping = False
         self._restart_attempt = 0
 
@@ -78,6 +80,7 @@ class P2PService(QObject):
 
         args = ["--etw"]
         self._line_buffer = JsonLineBuffer()
+        self._stdout_decoder.reset()
         self.process.setProgram(str(helper_path))
         self.process.setArguments(args)
         self.process.setWorkingDirectory(str(helper_path.parent))
@@ -140,7 +143,7 @@ class P2PService(QObject):
         self.restart_timer.start(restart_delay_ms(self._restart_attempt))
 
     def _read_stdout(self):
-        chunk = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        chunk = self._stdout_decoder.decode(bytes(self.process.readAllStandardOutput()))
         for line in self._line_buffer.feed(chunk):
             try:
                 message_type, value = parse_helper_message(line)
