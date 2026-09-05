@@ -7,10 +7,30 @@ def set_widget_always_on_top(widget: QWidget):
     try:
         import win32gui
         import win32con
+
+        # Overlay windows must remain above the borderless game without ever
+        # becoming the foreground/input-focus window.  The main and P2P
+        # overlays deliberately remain mouse-interactive for their context
+        # menu and settings-time dragging; map/HP overlays additionally use
+        # WindowTransparentForInput at their call sites.
+        widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        widget.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
+        widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
         hwnd = widget.winId().__int__()
+        # Enforce the native style as well as Qt's focus policy. This leaves
+        # TOPMOST and mouse interaction intact, but prevents mouse activation
+        # of the overlay from transferring foreground ownership from the game.
+        ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        win32gui.SetWindowLong(
+            hwnd, win32con.GWL_EXSTYLE, ex_style | win32con.WS_EX_NOACTIVATE
+        )
         win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 
                                 0, 0, 0, 0, 
-                                win32con.SWP_NOSIZE | win32con.SWP_NOMOVE)
+                                win32con.SWP_NOSIZE |
+                                win32con.SWP_NOMOVE |
+                                win32con.SWP_NOACTIVATE |
+                                win32con.SWP_NOOWNERZORDER)
         info(f"Window HWND: {hwnd} set to TOPMOST.")
     except Exception as e:
         warning(f"Error setting system always on top: {e}")

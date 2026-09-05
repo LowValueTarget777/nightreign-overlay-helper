@@ -160,8 +160,18 @@ class P2POverlayWidget(QWidget):
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
-            self.right_click_signal.emit()
+            self._right_click_pending = True
             event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.RightButton:
+            pending = getattr(self, "_right_click_pending", False)
+            self._right_click_pending = False
+            if pending and self.rect().contains(event.position().toPoint()):
+                self.right_click_signal.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self.draggable and event.buttons() == Qt.MouseButton.LeftButton:

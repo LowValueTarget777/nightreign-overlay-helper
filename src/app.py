@@ -1,7 +1,7 @@
 import sys
 import time
 import os
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu
@@ -96,7 +96,9 @@ if __name__ == "__main__":
         settings_window.show()
         settings_window.activateWindow()
         settings_window.raise_()
-    settings_action.triggered.connect(show_settings)
+    # Let the popup finish closing and release its input grab before
+    # activating the settings window.
+    settings_action.triggered.connect(lambda: QTimer.singleShot(0, show_settings))
     menu.addAction(settings_action)
     quit_action = QAction("退出")
     quit_action.triggered.connect(app.quit)
@@ -107,8 +109,9 @@ if __name__ == "__main__":
     
     def show_menu_at_cursor_pos():
         cursor_pos = QCursor.pos()
-        menu.move(cursor_pos)
-        menu.show()
+        # The signal comes from mouseReleaseEvent. Return to Qt first so its
+        # automatic mouse grab is released before the popup takes over.
+        QTimer.singleShot(0, lambda: menu.popup(cursor_pos))
     def on_menu_show():
         overlay.is_menu_opened = True
         map_overlay.is_menu_opened = True
@@ -123,9 +126,7 @@ if __name__ == "__main__":
         # info("Menu closed")
 
     overlay.right_click_signal.connect(show_menu_at_cursor_pos)
-    overlay.right_click_signal.connect(on_menu_show)
     p2p_overlay.right_click_signal.connect(show_menu_at_cursor_pos)
-    p2p_overlay.right_click_signal.connect(on_menu_show)
     menu.aboutToShow.connect(on_menu_show)
     menu.aboutToHide.connect(on_menu_hide)
 

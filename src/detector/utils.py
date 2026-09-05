@@ -3,8 +3,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from src.common import get_data_path
-from src.logger import warning, debug
+from src.logger import debug, warning
 from src.screencap import ScreencapEngine
+from src.screencap.errors import ScreencapRuntimeError
 
 
 def hls_to_rgb(hls: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -140,6 +141,26 @@ def _apply_processing(img: Image.Image, processing: str, region) -> Image.Image:
     return img
 
 
+def _crop_frame(full_array: np.ndarray, left: int, top: int, width: int, height: int, region) -> Image.Image:
+    if full_array.ndim < 2 or full_array.size == 0:
+        raise ScreencapRuntimeError("invalid_frame", "Captured frame is empty.")
+
+    frame_height, frame_width = full_array.shape[:2]
+    right = left + width
+    bottom = top + height
+    if left < 0 or top < 0 or right < 0 or right > frame_width or bottom > frame_height:
+        raise ScreencapRuntimeError(
+            "region_out_of_bounds",
+            f"Region {region} maps to ({left}, {top}, {width}, {height}) "
+            f"outside frame {frame_width}x{frame_height}.",
+        )
+
+    cropped = full_array[top:bottom, left:right]
+    if cropped.size == 0:
+        raise ScreencapRuntimeError("empty_region", f"Region {region} produced an empty image.")
+    return Image.fromarray(cropped)
+
+
 def grab_region(engine: ScreencapEngine, region: tuple[int, int, int, int], processing: str = 'none') -> Image.Image:
     """
     截取屏幕区域并可选地进行图像处理
@@ -161,14 +182,12 @@ def grab_region(engine: ScreencapEngine, region: tuple[int, int, int, int], proc
 
     monitors = get_monitors()
     if not monitors:
-        cropped = full_array[y:y + h, x:x + w]
-        return _apply_processing(Image.fromarray(cropped), processing, region)
+        return _apply_processing(_crop_frame(full_array, x, y, w, h, region), processing, region)
 
     for monitor in monitors[1:]:
         if (monitor["left"] <= x < monitor["left"] + monitor["width"] and
                 monitor["top"] <= y < monitor["top"] + monitor["height"]):
-            cropped = full_array[y:y + h, x:x + w]
-            return _apply_processing(Image.fromarray(cropped), processing, region)
+            return _apply_processing(_crop_frame(full_array, x, y, w, h, region), processing, region)
 
     main_screen = monitors[1]
     abs_x = x + main_screen["left"]
@@ -177,12 +196,10 @@ def grab_region(engine: ScreencapEngine, region: tuple[int, int, int, int], proc
     for monitor in monitors[1:]:
         if (monitor["left"] <= abs_x < monitor["left"] + monitor["width"] and
                 monitor["top"] <= abs_y < monitor["top"] + monitor["height"]):
-            cropped = full_array[abs_y:abs_y + h, abs_x:abs_x + w]
-            return _apply_processing(Image.fromarray(cropped), processing, region)
+            return _apply_processing(_crop_frame(full_array, abs_x, abs_y, w, h, region), processing, region)
 
     warning(f"Region {region} could not be mapped to any screen. Using fallback method.")
-    cropped = full_array[abs_y:abs_y + h, abs_x:abs_x + w]
-    return _apply_processing(Image.fromarray(cropped), processing, region)
+    return _apply_processing(_crop_frame(full_array, abs_x, abs_y, w, h, region), processing, region)
 
 
 DEFAULT_FONT_PATH = get_data_path("fonts/SourceHanSansSC-Normal.otf")
