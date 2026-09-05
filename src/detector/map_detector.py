@@ -10,6 +10,7 @@ import random
 import gc
 
 from src.config import Config
+from src.detector.partial_map import PartialMapInference
 from src.logger import info, warning, error, debug
 from src.common import get_appdata_path, get_data_path
 from src.detector.map_info import (
@@ -239,9 +240,11 @@ class MapDetectParam:
     do_match_pattern: bool = False
     return_pattern_topk: int | None = None
     hdr_processing_enabled: bool = False
+    infer_partial: bool = False
 
 @dataclass
 class MapDetectResult:
+    inference_message: str | None = None
     img: np.ndarray | None = None
     is_full_map: bool = None
     earth_shifting: int | None = None
@@ -252,6 +255,7 @@ class MapDetectResult:
 
 class MapDetector:  
     def __init__(self):
+        self.partial_inference = None
         # 地图信息
         self.info = load_map_info(
             get_data_path('csv/map_patterns.csv'),
@@ -907,8 +911,26 @@ class MapDetector:
             ret.earth_shifting_score = earth_shifting_score
 
         # 地图模式匹配
-        if param.do_match_pattern:
-            results = self._match_map_pattern(img, param.earth_shifting, topk=param.return_pattern_topk)
+        if param.do_match_pattern or param.infer_partial:
+            if param.infer_partial:
+                if self.partial_inference is None:
+                    self.partial_inference = PartialMapInference(self.info, self.poi_cate_info)
+                count = self.partial_inference.scan(cv2.resize(img, STD_MAP_SIZE, interpolation=CV2_RESIZE_METHOD))
+                ranked = self.partial_inference.evidence.rank(self.info.patterns, get_poi_key)
+                results = []
+                ret.inference_message = f"地图推测：已确认 {count} 个地标，等待探索"
+                if count >= 2 and ranked:
+                    best = ranked[0]
+                    if best[1] >= 2 and best[2] <= count * 0.25:
+                        tied = sum(row[2] == best[2] for row in ranked)
+                        ret.inference_message = f"地图推测：{count} 地标，{tied} 个并列候选"
+                        eligible = [row for row in ranked if row[1] >= 2 and row[2] <= count * 0.25]
+                        results = [MapPatternMatchResult(p, None, score, error)
+                                   for p, score, error in eligible[:param.return_pattern_topk or 5]]
+                    else:
+                        ret.inference_message = f"地图推测：{count} 地标存在冲突，请继续探索或清空"
+            else:
+                results = self._match_map_pattern(img, param.earth_shifting, topk=param.return_pattern_topk)
 
             # 决定信息绘制大小
             if config.fixed_map_overlay_draw_size is not None:
@@ -927,6 +949,12 @@ class MapDetector:
                 try:
                     info(f"MapDetector: Start to draw overlay image for pattern {result.pattern.id}")
                     overlay_img = self._draw_overlay_image(result, draw_size, i)
+                    if param.infer_partial:
+                        caption_scale = draw_size[0] / 750
+                        draw_text(overlay_img, (draw_size[0]//2, int(25 * caption_scale)),
+                                  f"推测 #{i+1} · {result.score}/{count} 地标相符（非确定结果）",
+                                  size=max(12, int(18 * caption_scale)), color=(255, 200, 80, 255),
+                                  outline_width=max(1, int(2 * caption_scale)))
                     ret.overlay_images.append(overlay_img)
                     ret.patterns.append(result.pattern)
                     gc.collect()

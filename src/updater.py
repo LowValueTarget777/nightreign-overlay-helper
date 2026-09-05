@@ -107,6 +107,11 @@ class Updater(QObject):
         self.map_overlay = map_overlay
         self.update_map_overlay_ui_state_signal.connect(self.map_overlay.update_ui_state)
         self.map_detect_enabled: bool = True
+        self.partial_map_enabled = False
+        self._reset_partial_requested = False
+        self._partial_game_hwnd = None
+        self.partial_map_message = "地图推测：等待探索"
+        self._last_day1_detection = float("-inf")
         self.map_region: tuple[int] = None
         self.current_is_full_map: bool = False
         self.do_match_map_pattern_flag: DoMatchMapPatternFlag = DoMatchMapPatternFlag.TRUE
@@ -137,6 +142,8 @@ class Updater(QObject):
     # =============== Day and Phase Management =============== #
 
     def start_day1(self):
+        if self.day != 1:
+            self.reset_partial_map()
         self.day = 1
         self.current_phase = Phase.FIRST_CIRCLE_STABLE
         self.phase_start_time = self.get_time()
@@ -227,6 +234,10 @@ class Updater(QObject):
         )
         result = self.detector.detect(param)
         if result.day_detect_result.start_day1:
+            now = time.monotonic()
+            if now - self._last_day1_detection > 30:
+                self.reset_partial_map()
+            self._last_day1_detection = now
             self.start_day1()
         elif result.day_detect_result.start_day2:
             self.start_day2()
@@ -289,6 +300,11 @@ class Updater(QObject):
         info("Set to detect map pattern once.")
 
     def update_overlay_match_map_pattern_text(self):
+        if self.partial_map_enabled and self.map_detect_enabled:
+            self.update_overlay_ui_state_signal.emit(OverlayUIState(
+                map_pattern_match_text=" - " + self.partial_map_message,
+            ))
+            return
         match_ready = self.do_match_map_pattern_flag != DoMatchMapPatternFlag.FALSE and self.map_detect_enabled
         if match_ready:
             self.update_overlay_ui_state_signal.emit(OverlayUIState(
@@ -322,8 +338,11 @@ class Updater(QObject):
             info("Update map overlay image.")
 
     def show_map_overlay(self):
+        if self.map_region is None:
+            return
         if not self.map_overlay_visible:
             self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(
+                visible=True,
                 opacity=1.0,
                 x=self.map_region[0],
                 y=self.map_region[1],
@@ -347,7 +366,42 @@ class Updater(QObject):
         else:
             self.show_map_overlay()
 
+    def reset_partial_map(self):
+        # The settings window only requests reset; evidence belongs to the
+        # detector worker and must not be mutated from the GUI thread.
+        self._reset_partial_requested = True
+
+    def _detect_partial_map(self, map_img, is_full_map):
+        if self.get_time() - self.last_map_pattern_match_time >= 5:
+            self.set_to_detect_map_pattern_once()
+            self.last_map_pattern_match_time = self.get_time()
+        if self.do_match_map_pattern_flag == DoMatchMapPatternFlag.PREPARE:
+            self.do_match_map_pattern_flag = DoMatchMapPatternFlag.TRUE
+            self.update_map_overlay_images(None)
+            return
+        if not is_full_map or self.do_match_map_pattern_flag != DoMatchMapPatternFlag.TRUE:
+            return
+        self.do_match_map_pattern_flag = DoMatchMapPatternFlag.FALSE
+        result = self.detector.detect(DetectParam(map_detect_param=MapDetectParam(
+            map_region=self.map_region, img=map_img, infer_partial=True,
+            return_pattern_topk=self.map_pattern_return_topk,
+        ))).map_detect_result
+        self.partial_map_message = result.inference_message or "地图推测：等待探索"
+        info(self.partial_map_message)
+        self.update_map_overlay_images(result.overlay_images or None)
+        self.last_map_pattern_match_time = self.get_time()
+        self.update_overlay_match_map_pattern_text()
+
     def detect_and_update_map(self):
+        hwnd = get_engine()._capture_hwnd
+        if hwnd != self._partial_game_hwnd:
+            self._partial_game_hwnd = hwnd
+            self._reset_partial_requested = True
+        if self._reset_partial_requested:
+            self._reset_partial_requested = False
+            self.detector.map_detector.partial_inference = None
+            self.partial_map_message = "地图推测：等待探索"
+            self.set_to_detect_map_pattern_once()
         if not self.map_detect_enabled:
             self.hide_map_overlay()
             return
@@ -368,12 +422,17 @@ class Updater(QObject):
                 info("Current map changed to full map.")
                 self.current_is_full_map = True
                 self.show_map_overlay()
+                if self.partial_map_enabled:
+                    self.set_to_detect_map_pattern_once()
             if not is_full_map and self.current_is_full_map:
                 info("Current map changed to non-full map.")
                 self.current_is_full_map = False
                 self.hide_map_overlay()
 
         self.update_overlay_match_map_pattern_text()
+        if self.partial_map_enabled:
+            self._detect_partial_map(map_img, is_full_map)
+            return
         if self.get_time() - self.last_map_pattern_match_time > Config.get().map_pattern_match_interval:
             self.set_to_detect_map_pattern_once()
             self.last_map_pattern_match_time = self.get_time()
@@ -526,7 +585,7 @@ class Updater(QObject):
                 self.auto_regions_status.emit(message, regions)
                 self.current_is_full_map = False
                 self.set_to_detect_map_pattern_once()
-                self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(visible=False))
+                self.hide_map_overlay()
                 self.hp_overlay_ui_state_signal.emit(HpOverlayUIState(visible=False))
                 # Length history is measured in pixels, so it cannot survive
                 # a resolution/region change (including keep-last-valid mode).
