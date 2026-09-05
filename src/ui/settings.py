@@ -314,6 +314,17 @@ class SettingsWindow(QWidget):
         screencap_mode_layout.addWidget(self.screencap_mode_combobox)
         self.performance_layout.addLayout(screencap_mode_layout)
 
+        self.auto_regions_checkbox = QCheckBox("自动适配识别区域（16:9）")
+        self.auto_regions_checkbox.setToolTip(
+            "以 2560×1440 默认 HUD 为基准，按游戏客户区自动缩放五组区域。\n"
+            "关闭后恢复原手动框选坐标；特殊 HUD 或非 16:9 请使用手动模式。"
+        )
+        self.auto_regions_checkbox.toggled.connect(self.update_auto_regions)
+        self.performance_layout.addWidget(self.auto_regions_checkbox)
+        self.auto_regions_status_label = QLabel("自动区域：等待游戏")
+        self.auto_regions_status_label.setWordWrap(True)
+        self.performance_layout.addWidget(self.auto_regions_status_label)
+
         only_show_when_game_foreground_layout = QHBoxLayout()
         self.only_show_when_game_foreground_checkbox = QCheckBox("仅在游戏时显示和检测")
         self.only_show_when_game_foreground_checkbox.setChecked(False)
@@ -875,6 +886,11 @@ class SettingsWindow(QWidget):
             # HDR图像处理
             load_checkbox_state(self.hdr_processing_checkbox, data.get("hdr_processing_enabled", False))
 
+            self.auto_regions_checkbox.blockSignals(True)
+            self.auto_regions_checkbox.setChecked(data.get("auto_regions_enabled", True))
+            self.auto_regions_checkbox.blockSignals(False)
+            self.update_auto_regions()
+
             info("Settings loaded successfully")
         except Exception as e:
             error(f"Failed to load settings: {e}")
@@ -898,6 +914,7 @@ class SettingsWindow(QWidget):
                 "only_show_when_game_foreground": self.only_show_when_game_foreground_checkbox.isChecked(),
                 "detect_interval": self.detect_interval_combobox.currentText(),
                 "screencap_mode": self.screencap_mode_combobox.currentText(),
+                "auto_regions_enabled": self.auto_regions_checkbox.isChecked(),
                 # 队友延迟
                 "p2p_enabled": self.p2p_enabled_checkbox.isChecked(),
                 "p2p_size": self.p2p_size_slider.value(),
@@ -1008,6 +1025,7 @@ class SettingsWindow(QWidget):
         self.p2p_service.status_changed.connect(self.update_p2p_status_display)
         self.playtime_service.status_changed.connect(self.update_playtime_status_display)
         self.updater = updater
+        self.updater.auto_regions_status.connect(self.show_auto_regions_status)
         self.input = input
 
         self.setWindowIcon(QIcon(ICON_PATH))
@@ -1166,6 +1184,9 @@ class SettingsWindow(QWidget):
         info(f"DayX detect lang changed to {self.dayx_detect_lang}")
 
     def capture_day1_hpcolor_region(self):
+        if self.auto_regions_checkbox.isChecked():
+            info_box("请先关闭自动适配识别区域，再手动框选。", self)
+            return
         COLOR_HPCOLOR = "#a84747"
         COLOR_DAY_I = "#686435"
         SCREENSHOT_WINDOW_CONFIG = {
@@ -1435,6 +1456,9 @@ class SettingsWindow(QWidget):
         msg.exec()
 
     def capture_map_region(self):
+        if self.auto_regions_checkbox.isChecked():
+            info_box("请先关闭自动适配识别区域，再手动框选。", self)
+            return
         COLOR_MAP_REGION = "#4384b9"
         SCREENSHOT_WINDOW_CONFIG = {
             'annotation_buttons': [
@@ -1462,11 +1486,44 @@ class SettingsWindow(QWidget):
                 self.update_map_region()
             self.save_settings()
 
+    def update_auto_regions(self, checked=None):
+        enabled = self.auto_regions_checkbox.isChecked()
+        self.updater.auto_regions_enabled = enabled
+        self.updater._auto_regions_message = None
+        self.updater.set_to_detect_map_pattern_once()
+        if enabled:
+            self.show_auto_regions_status("自动区域：等待游戏画面", {})
+        else:
+            self.auto_regions_status_label.setText("手动区域：使用已保存的框选坐标")
+            self.update_day1_hpcolor_regions()
+            self.update_map_region()
+            self.update_hpbar_region()
+            self.update_art_region()
+
+    def show_auto_regions_status(self, message, regions):
+        if not self.auto_regions_checkbox.isChecked():
+            return
+        self.auto_regions_status_label.setText(message)
+        for name, label in (
+            ("day1_detect_region", self.day1_detect_region_label),
+            ("hpcolor_detect_region", self.hpcolor_detect_region_label),
+            ("map_region", self.map_region_label),
+            ("hpbar_region", self.hpbar_region_label),
+            ("art_region", self.art_region_label),
+        ):
+            region = regions.get(name)
+            label.setText(f"自动区域：{region}" if region else "自动区域：等待适配")
+
     def update_map_region(self):
         map_region = self.map_region
-        if map_region is not None:
+        if map_region is not None and not self.updater.auto_regions_enabled:
             old_map_region = map_region.copy()
-            screen = get_qt_screen_by_region(map_region)
+            try:
+                screen = get_qt_screen_by_region(map_region)
+            except ValueError:
+                self.updater.map_region = None
+                self.map_region_label.setText("手动地图区域不在当前屏幕，请重新框选")
+                return
             scale = screen.devicePixelRatio()
             map_region = process_region_to_adapt_scale(map_region, scale)
             info(f"Map region adapted to screen scale {scale}: {old_map_region} -> {map_region}")
@@ -1626,6 +1683,9 @@ class SettingsWindow(QWidget):
         info(f"HP detect keep last valid: {enabled}")
 
     def capture_hpbar_region(self):
+        if self.auto_regions_checkbox.isChecked():
+            info_box("请先关闭自动适配识别区域，再手动框选。", self)
+            return
         COLOR_HPBAR_REGION = "#eb3b3b"
         SCREENSHOT_WINDOW_CONFIG = {
             'annotation_buttons': [
@@ -1698,6 +1758,9 @@ class SettingsWindow(QWidget):
         info(f"Art detect enabled: {self.updater.art_detect_enabled}")
     
     def capture_art_region(self):
+        if self.auto_regions_checkbox.isChecked():
+            info_box("请先关闭自动适配识别区域，再手动框选。", self)
+            return
         COLOR_ART_REGION = "#3235eb"
         SCREENSHOT_WINDOW_CONFIG = {
             'annotation_buttons': [

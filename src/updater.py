@@ -5,6 +5,7 @@ from PIL import Image
 
 from src.common import GAME_WINDOW_TITLE
 from src.config import Config
+from src.screencap.regions import adaptive_regions, detection_region
 from src.logger import info, warning, error
 from src.ui.input import InputWorker
 from src.ui.overlay import OverlayWidget, OverlayUIState
@@ -51,6 +52,12 @@ def format_period(seconds: int) -> str:
 
 
 class Updater(QObject):
+    auto_regions_status = pyqtSignal(str, dict)
+    day1_detect_region = detection_region("day1_detect_region")
+    hpcolor_detect_region = detection_region("hpcolor_detect_region")
+    map_region = detection_region("map_region")
+    hpbar_region = detection_region("hpbar_region")
+    art_region = detection_region("art_region")
     update_overlay_ui_state_signal = pyqtSignal(OverlayUIState)
     update_map_overlay_ui_state_signal = pyqtSignal(MapOverlayUIState)
     hp_overlay_ui_state_signal = pyqtSignal(HpOverlayUIState)
@@ -66,6 +73,9 @@ class Updater(QObject):
     ):
         super().__init__()
         self._running = False
+        self.auto_regions_enabled = True
+        self._auto_regions = {}
+        self._auto_regions_message = None
 
         self.is_setting_opened = False
         self.is_menu_opened = False
@@ -501,6 +511,32 @@ class Updater(QObject):
     # =============== Main Loop =============== #
 
     def detect_and_update_all(self):
+        if self.auto_regions_enabled:
+            try:
+                frame = get_engine().grab_fullscreen()
+                client = frame.info["client_rect"]
+                regions = adaptive_regions(client)
+                message = f"自动区域：{client[2]}×{client[3]}（16:9）"
+            except (ScreencapRuntimeError, ValueError, KeyError) as e:
+                regions = {}
+                message = f"自动区域等待：{e}"
+            if regions != self._auto_regions or message != self._auto_regions_message:
+                self._auto_regions = regions
+                self._auto_regions_message = message
+                self.auto_regions_status.emit(message, regions)
+                self.current_is_full_map = False
+                self.set_to_detect_map_pattern_once()
+                self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(visible=False))
+                self.hp_overlay_ui_state_signal.emit(HpOverlayUIState(visible=False))
+                # Length history is measured in pixels, so it cannot survive
+                # a resolution/region change (including keep-last-valid mode).
+                hp_detector = self.detector.hp_detector
+                hp_detector.recent_lengths.clear()
+                hp_detector.last_valid_length = None
+                hp_detector.stable_count = 0
+                self.hp_length = None
+            if not regions:
+                return
         for detect_fn in [
             self.detect_and_update_dayx,
             self.detect_and_update_in_rain,

@@ -7,7 +7,7 @@ from PIL import Image
 from src.common import GAME_WINDOW_TITLE
 from src.logger import info, warning
 from src.screencap.errors import ScreencapInitError, ScreencapRuntimeError
-from src.screencap.hwnd_resolver import find_game_hwnd, get_client_size
+from src.screencap.hwnd_resolver import find_game_hwnd, get_client_size, get_capture_geometry
 from src.screencap.native_loader import get_native_dll_dir, get_native_dll_path
 from src.screencap.types import EngineStatus, ScreencapMode
 
@@ -25,6 +25,8 @@ class ScreencapEngine:
         self._pending_hwnd: int | None = None
         self._pending_client_size: tuple[int, int] | None = None
         self._pending_since: float = 0.0
+        self._capture_hwnd = None
+        self._background_capture = False
 
     @property
     def status(self) -> EngineStatus:
@@ -143,6 +145,8 @@ class ScreencapEngine:
                 methods = Manager.METHOD_DXGI_DESKTOP_DUP
 
             self._mgr = Manager(hwnd=hwnd, methods=methods)
+            self._capture_hwnd = hwnd
+            self._background_capture = mode == ScreencapMode.BACKGROUND
 
             if not self._mgr.connect():
                 raise ScreencapInitError(
@@ -160,6 +164,7 @@ class ScreencapEngine:
                 )
 
             self._last_frame = first_frame
+            self._annotate_geometry(first_frame)
             self._last_frame_time = time.time()
             info(f"ScreencapEngine initialized, selected method: {self._selected_method_name}")
             self._status = EngineStatus.CONNECTED
@@ -179,6 +184,13 @@ class ScreencapEngine:
                 self._reset_pending_window()
             self._status = EngineStatus.FAILED
             raise ScreencapInitError("connect_failed", str(e)) from e
+
+    def _annotate_geometry(self, frame):
+        client, bounds = get_capture_geometry(self._capture_hwnd, self._background_capture)
+        if frame.size != bounds[2:]:
+            raise ScreencapRuntimeError("geometry_changed", "Capture size does not match window/monitor geometry.")
+        frame.info["screen_origin"] = bounds[:2]
+        frame.info["client_rect"] = client
 
     def grab_fullscreen(self) -> Image.Image:
         if self._status != EngineStatus.CONNECTED or self._mgr is None:
@@ -200,6 +212,7 @@ class ScreencapEngine:
 
         try:
             img = self._decode_frame(self._mgr.screencap())
+            self._annotate_geometry(img)
             self._last_frame = img
             self._last_frame_time = now
             return img

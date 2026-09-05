@@ -59,6 +59,7 @@ The program recognizes game information through screenshots and reads local Stea
 - 地图识别与地图信息悬浮。
 - 显示“血量较低触发”与“满血时触发”的词条对应百分比血量位置标记。
 - 显示部分角色的绝招buff倒计时。
+- 默认按游戏客户区自动适配 16:9 的五组识别区域（以 2560×1440 默认 HUD 为基准）；特殊 HUD 或其他宽高比可在设置中关闭自动适配，恢复手动框选。原手动坐标会保留。
 - 通过独立悬浮窗显示《黑夜君临》队友的 Steam 昵称、Ping 与连接稳定度。
 
 ## 构建

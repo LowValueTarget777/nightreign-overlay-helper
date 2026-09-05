@@ -47,3 +47,23 @@ def get_client_size(hwnd: int) -> tuple[int, int] | None:
     if width <= 0 or height <= 0:
         return None
     return width, height
+
+
+def get_capture_geometry(hwnd: int, background: bool):
+    """Read geometry only. Never activate, restore or resize the game."""
+    import win32gui
+    import win32api
+    import win32con
+
+    size = get_client_size(hwnd)
+    if size is None:
+        raise ValueError("Game window is not ready")
+    x, y = win32gui.ClientToScreen(hwnd, (0, 0))
+    client = (x, y, *size)
+    if background:
+        # Maa crops the WGC frame to the client area before returning it.
+        return client, client
+    else:
+        monitor = win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+        left, top, right, bottom = win32api.GetMonitorInfo(monitor)["Monitor"]
+    return client, (left, top, right - left, bottom - top)

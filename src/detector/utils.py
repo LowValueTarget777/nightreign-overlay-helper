@@ -180,6 +180,13 @@ def grab_region(engine: ScreencapEngine, region: tuple[int, int, int, int], proc
     full_img = engine.grab_fullscreen()
     full_array = np.array(full_img)
 
+    origin = full_img.info.get("screen_origin")
+    if origin is not None:
+        return _apply_processing(
+            _crop_frame(full_array, x - origin[0], y - origin[1], w, h, region),
+            processing, region,
+        )
+
     monitors = get_monitors()
     if not monitors:
         return _apply_processing(_crop_frame(full_array, x, y, w, h, region), processing, region)
