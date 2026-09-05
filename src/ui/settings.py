@@ -633,7 +633,7 @@ class SettingsWindow(QWidget):
         self.playtime_enabled_checkbox.stateChanged.connect(self.update_playtime_enabled)
         layout.addWidget(self.playtime_enabled_checkbox)
 
-        self.playtime_hint = QLabel("默认关闭；仅能查询公开了游戏详情的玩家")
+        self.playtime_hint = QLabel("默认关闭，开启后记忆；优先免 Key 查询公开资料页。页面时长可能有舍入或更新延迟；隐藏、未列出或访问失败时不可用。可选填 Key 作为备用。")
         self.playtime_hint.setWordWrap(True)
         self.playtime_hint.setStyleSheet("color: gray;")
         layout.addWidget(self.playtime_hint)
@@ -645,7 +645,7 @@ class SettingsWindow(QWidget):
         self.steam_api_key_input.setPlaceholderText(
             "API Key 已使用 Windows 加密保存"
             if self.playtime_service.has_api_key
-            else "输入自己的 Steam Web API Key"
+            else "可选：输入自己的 Steam Web API Key（备用）"
         )
         self.steam_api_key_input.returnPressed.connect(self.save_steam_api_key)
         key_layout.addWidget(self.steam_api_key_input)
@@ -656,7 +656,7 @@ class SettingsWindow(QWidget):
         layout.addLayout(key_layout)
 
         key_buttons_layout = QHBoxLayout()
-        self.get_key_button = QPushButton("获取 Steam Web API Key")
+        self.get_key_button = QPushButton("获取备用 Steam Web API Key（可选）")
         self.get_key_button.setStyleSheet(BUTTON_STYLE)
         self.get_key_button.clicked.connect(self.open_steam_api_key_page)
         key_buttons_layout.addWidget(self.get_key_button)
@@ -1661,7 +1661,7 @@ class SettingsWindow(QWidget):
             error_box("无法清除已保存的 Steam Web API Key，请检查日志。", self)
             return
         self.steam_api_key_input.clear()
-        self.steam_api_key_input.setPlaceholderText("输入自己的 Steam Web API Key")
+        self.steam_api_key_input.setPlaceholderText("可选：输入自己的 Steam Web API Key（备用）")
 
     def update_playtime_status_display(self, message: str):
         self.playtime_status_label.setText(f"游戏时长：{message}")

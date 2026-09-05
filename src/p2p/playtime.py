@@ -15,6 +15,7 @@ from src.common import get_appdata_path
 from src.logger import warning
 
 from .models import P2PPeer
+from .public_playtime import parse_public_playtime
 
 NIGHTREIGN_APP_ID = 2622380
 STEAM_OWNED_GAMES_URL = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
@@ -42,7 +43,7 @@ def format_playtime(result: PlaytimeResult) -> str:
         return "未公开"
     if result.state == "missing_key":
         return "未配置"
-    return "--"
+    return "时长不可用"
 
 
 def parse_playtime_response(raw_data: bytes) -> PlaytimeResult:
@@ -142,6 +143,7 @@ class SteamPlaytimeService(QObject):
             self._retry_timer.stop()
             self._abort_pending()
             self._results.clear()
+            self._retry_after.clear()
             self.results_changed.emit({})
         else:
             self._retry_timer.start()
@@ -172,10 +174,9 @@ class SteamPlaytimeService(QObject):
         self._api_key = None
         self._abort_pending()
         self._retry_after.clear()
-        self._results = {
-            peer.steam_id: PlaytimeResult("missing_key") for peer in self._peers
-        } if self.enabled else {}
+        self._results.clear()
         self.results_changed.emit(dict(self._results))
+        self._query_missing_peers()
         self._emit_status()
 
     def stop(self):
@@ -185,30 +186,20 @@ class SteamPlaytimeService(QObject):
     def _query_missing_peers(self):
         if not self.enabled:
             return
-        if not self._api_key:
-            changed = False
-            for peer in self._peers:
-                if self._results.get(peer.steam_id) != PlaytimeResult("missing_key"):
-                    self._results[peer.steam_id] = PlaytimeResult("missing_key")
-                    changed = True
-            if changed:
-                self.results_changed.emit(dict(self._results))
-            self._emit_status()
-            return
-
         now = time.monotonic()
         for peer in self._peers:
             steam_id = peer.steam_id
-            result = self._results.get(steam_id)
             if steam_id in self._pending:
-                continue
-            if result is not None and result.state in {"available", "private"}:
                 continue
             if now < self._retry_after.get(steam_id, 0):
                 continue
+            if len(self._pending) >= 2:
+                break
+            if not re.fullmatch(r"[0-9]{17}", steam_id):
+                continue
             self._start_query(steam_id)
 
-    def _start_query(self, steam_id: str):
+    def _start_query(self, steam_id: str, *, use_api: bool = False):
         query = QUrlQuery()
         query.addQueryItem("key", self._api_key or "")
         query.addQueryItem("steamid", steam_id)
@@ -217,20 +208,46 @@ class SteamPlaytimeService(QObject):
         query.addQueryItem("appids_filter[0]", str(NIGHTREIGN_APP_ID))
         url = QUrl(STEAM_OWNED_GAMES_URL)
         url.setQuery(query)
+        if not use_api:
+            url = QUrl(f"https://steamcommunity.com/profiles/{steam_id}/?l=english")
 
         request = QNetworkRequest(url)
         request.setTransferTimeout(10_000)
+        request.setAttribute(QNetworkRequest.Attribute.CookieLoadControlAttribute, QNetworkRequest.LoadControl.Manual)
+        request.setAttribute(QNetworkRequest.Attribute.CookieSaveControlAttribute, QNetworkRequest.LoadControl.Manual)
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute, QNetworkRequest.RedirectPolicy.SameOriginRedirectPolicy)
         request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, "nightreign-overlay-helper")
         reply = self._network.get(request)
         self._pending[steam_id] = reply
         self._results[steam_id] = PlaytimeResult("loading")
-        reply.finished.connect(lambda peer_id=steam_id: self._on_finished(peer_id))
+        reply.finished.connect(lambda peer_id=steam_id: self._on_finished(peer_id, use_api=use_api))
         self.results_changed.emit(dict(self._results))
         self._emit_status()
 
-    def _on_finished(self, steam_id: str):
+    def _on_finished(self, steam_id: str, *, use_api: bool = False):
         reply = self._pending.pop(steam_id, None)
         if reply is None:
+            return
+        if not use_api:
+            try:
+                minutes = (
+                    parse_public_playtime(bytes(reply.readAll()))
+                    if reply.error() == QNetworkReply.NetworkError.NoError else None
+                )
+            except (ValueError, UnicodeError):
+                minutes = None
+            finally:
+                reply.deleteLater()
+            if minutes is None and self._api_key and self.enabled:
+                self._start_query(steam_id, use_api=True)
+                return
+            self._results[steam_id] = (
+                PlaytimeResult("available", minutes=minutes)
+                if minutes is not None else PlaytimeResult("unavailable", message="公开页面未提供时长或暂时无法访问")
+            )
+            self._retry_after[steam_id] = time.monotonic() + (1800 if minutes is not None else RETRY_DELAY_SECONDS)
+            self.results_changed.emit(dict(self._results))
+            self._emit_status()
             return
         try:
             status_code = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
@@ -246,7 +263,9 @@ class SteamPlaytimeService(QObject):
                 self._emit_status(status_message)
             else:
                 self._results[steam_id] = parse_playtime_response(bytes(reply.readAll()))
-                self._retry_after.pop(steam_id, None)
+                self._retry_after[steam_id] = time.monotonic() + (
+                    1800 if self._results[steam_id].state == "available" else RETRY_DELAY_SECONDS
+                )
                 self._emit_status()
         except (TypeError, ValueError, UnicodeError) as exc:
             self._results[steam_id] = PlaytimeResult("error", message="响应格式异常")
@@ -269,10 +288,10 @@ class SteamPlaytimeService(QObject):
             message = override
         elif not self.enabled:
             message = "游戏时长查询已关闭"
-        elif not self._api_key:
-            message = "请先获取并保存自己的 Steam Web API Key"
         elif self._pending:
             message = f"正在查询 {len(self._pending)} 名队友的游戏时长"
         else:
-            message = "游戏时长查询已启用，仅公开游戏详情可见"
+            message = "优先查询公开页面（免 Key）" + (
+                "；API 备用已配置" if self._api_key else "；未提供时长时显示不可用"
+            )
         self.status_changed.emit(message)
