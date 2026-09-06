@@ -936,7 +936,8 @@ class MapDetector:
                 if self.partial_inference is None:
                     self.partial_inference = PartialMapInference(self.info, self.poi_cate_info)
                 count = self.partial_inference.scan(cv2.resize(img, STD_MAP_SIZE, interpolation=CV2_RESIZE_METHOD))
-                ranked = self.partial_inference.evidence.rank(self.info.patterns, get_poi_key)
+                ranked = self.partial_inference.evidence.rank(
+                    self.info.patterns, get_poi_key, self.partial_inference.icon_aliases)
                 results = []
                 ret.inference_message = f"地图推测：已确认 {count} 个地标，等待探索"
                 if count >= 2 and ranked:

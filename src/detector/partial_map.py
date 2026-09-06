@@ -29,8 +29,10 @@ class LandmarkEvidence:
         # Occlusion is not evidence that a previously seen landmark vanished.
         self.pending = pending
 
-    def rank(self, patterns, icon_key):
-        key = (id(patterns), icon_key, tuple(sorted(self.confirmed.items())))
+    def rank(self, patterns, icon_key, icon_aliases=None):
+        icon_aliases = icon_aliases or {}
+        key = (id(patterns), icon_key, tuple(sorted(self.confirmed.items())),
+               tuple(sorted(icon_aliases.items())))
         if key == self._rank_key:
             return self._ranked
         ranked = []
@@ -38,8 +40,10 @@ class LandmarkEvidence:
             matches = 0
             for pos, kind in self.confirmed.items():
                 construct = pattern.pos_constructions.get(pos)
-                if construct is not None and icon_key(construct.type) == kind:
-                    matches += 1
+                if construct is not None:
+                    expected = icon_key(construct.type)
+                    if icon_aliases.get(expected, expected) == kind:
+                        matches += 1
             ranked.append((pattern, matches, len(self.confirmed) - matches))
         self._rank_key = key
         self._rank_patterns = patterns  # Keep the identity in the cache key alive.
@@ -52,10 +56,19 @@ class PartialMapInference:
         self.evidence = LandmarkEvidence()
         self.positions = sorted(set().union(*map_info.all_poi_pos.values()))
         self.templates = []
+        self.icon_aliases = {}
+        visual_keys = {}
         for key, category in sorted(categories.items()):
             if key == 0:
                 continue
             rgba = np.array(category.base_image)
+            # Normal and DLC categories can share the exact same artwork.
+            # They are one visual observation, not competing runner-up matches.
+            visual = (rgba.shape, rgba.tobytes())
+            canonical = visual_keys.setdefault(visual, key)
+            self.icon_aliases[key] = canonical
+            if canonical != key:
+                continue
             alpha = rgba[:, :, 3]
             ys, xs = np.where(alpha > 220)
             if len(xs) < 15:
@@ -87,11 +100,18 @@ class PartialMapInference:
                     continue
                 result = cv2.matchTemplate(patch, template, cv2.TM_SQDIFF_NORMED, mask=mask)
                 result = np.where(np.isfinite(result), result, np.inf)
-                score = float(result.min())
-                scores.append((score, key))
-            scores.sort()
+                iy, ix = np.unravel_index(result.argmin(), result.shape)
+                score = float(result[iy, ix])
+                scores.append((score, key, template, mask, patch[iy:iy+h, ix:ix+w]))
+            scores.sort(key=lambda row: (row[0], row[1]))
             if scores and scores[0][0] < 0.12:
                 if len(scores) == 1 or scores[1][0] - scores[0][0] >= 0.035:
-                    observations[pos] = scores[0][1]
+                    _, key, template, mask, matched = scores[0]
+                    # Similar terrain brightness alone is not an icon. Require
+                    # the opaque pixels' light/dark pattern to agree as well.
+                    correlation = float(cv2.matchTemplate(
+                        matched, template, cv2.TM_CCOEFF_NORMED, mask=mask)[0, 0])
+                    if np.isfinite(correlation) and correlation >= 0.65:
+                        observations[pos] = key
         self.evidence.observe(observations)
         return len(self.evidence.confirmed)
