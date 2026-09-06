@@ -7,10 +7,16 @@ class LandmarkEvidence:
     def __init__(self):
         self.confirmed = {}
         self.pending = {}
+        self._rank_key = None
+        self._ranked = None
+        self._rank_patterns = None
 
     def clear(self):
         self.confirmed.clear()
         self.pending.clear()
+        self._rank_key = None
+        self._ranked = None
+        self._rank_patterns = None
 
     def observe(self, observations):
         pending = {}
@@ -24,6 +30,9 @@ class LandmarkEvidence:
         self.pending = pending
 
     def rank(self, patterns, icon_key):
+        key = (id(patterns), icon_key, tuple(sorted(self.confirmed.items())))
+        if key == self._rank_key:
+            return self._ranked
         ranked = []
         for pattern in patterns:
             matches = 0
@@ -32,7 +41,10 @@ class LandmarkEvidence:
                 if construct is not None and icon_key(construct.type) == kind:
                     matches += 1
             ranked.append((pattern, matches, len(self.confirmed) - matches))
-        return sorted(ranked, key=lambda row: (row[2], -row[1], row[0].id))
+        self._rank_key = key
+        self._rank_patterns = patterns  # Keep the identity in the cache key alive.
+        self._ranked = sorted(ranked, key=lambda row: (row[2], -row[1], row[0].id))
+        return self._ranked
 
 
 class PartialMapInference:

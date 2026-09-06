@@ -1,17 +1,19 @@
 import cv2
 import os
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Callable
 from PIL import Image
 import time
 from src.screencap import ScreencapEngine
 from enum import Enum
 import random
-import gc
+from hashlib import blake2b
 
 from src.config import Config
 from src.detector.partial_map import PartialMapInference
-from src.logger import info, warning, error, debug
+from src.logger import info, warning, error, debug, diagnostics_enabled
+from src.performance import ByteCache
 from src.common import get_appdata_path, get_data_path
 from src.detector.map_info import (
     load_map_info, 
@@ -241,9 +243,11 @@ class MapDetectParam:
     return_pattern_topk: int | None = None
     hdr_processing_enabled: bool = False
     infer_partial: bool = False
+    on_progress: Callable | None = None
 
 @dataclass
 class MapDetectResult:
+    rendering_complete: bool = True
     inference_message: str | None = None
     img: np.ndarray | None = None
     is_full_map: bool = None
@@ -256,6 +260,9 @@ class MapDetectResult:
 class MapDetector:  
     def __init__(self):
         self.partial_inference = None
+        self._resources = ByteCache(16 * 1024 * 1024)
+        self._poi_templates = ByteCache(24 * 1024 * 1024)
+        self._overlay_layers = ByteCache(32 * 1024 * 1024)
         # 地图信息
         self.info = load_map_info(
             get_data_path('csv/map_patterns.csv'),
@@ -450,6 +457,7 @@ class MapDetector:
         h, w, _ = img_for_poi.shape
         h_min, h_max, w_min, w_max = int(h*0.2), int(h*0.8), int(w*0.2), int(w*0.6)
         img_for_poi = img_for_poi[h_min:h_max, w_min:w_max]
+        background_key = blake2b(bg.tobytes(), digest_size=16).digest()
         bg = Image.fromarray(bg).convert("RGBA")
 
         best_poi_key = None
@@ -467,20 +475,21 @@ class MapDetector:
             if not any(match_prefix(ctype, poi_key) for ctype in possible_ctypes):
                 continue    # 仅匹配该位置可能出现的POI类型
             
-            target_imgs = []
-            for dx in range(-MAX_OFFSET, MAX_OFFSET+1, OFFSET_STRIDE):
-                for dy in range(-MAX_OFFSET, MAX_OFFSET+1, OFFSET_STRIDE):
-                    for s in np.linspace(SCALE_RANGE[0], SCALE_RANGE[1], SCALE_RANGE[2], endpoint=True):
-                        size = (int(STD_POI_SIZE[0] * s), int(STD_POI_SIZE[1] * s))
-                        resized_poi_icon = info.get_resized_image(size)
-                        poi_img = bg.copy()
-                        poi_img.alpha_composite(resized_poi_icon, (dx, dy))
-                        poi_img = np.array(poi_img)[..., :3]
-                        poi_img = cv2.resize(poi_img, DOWNSAMPLE_SIZE, interpolation=CV2_RESIZE_METHOD)
-                        poi_img = poi_img[h_min:h_max, w_min:w_max]
-                        target_imgs.append(poi_img)
+            def make_templates():
+                target_imgs = []
+                for dx in range(-MAX_OFFSET, MAX_OFFSET+1, OFFSET_STRIDE):
+                    for dy in range(-MAX_OFFSET, MAX_OFFSET+1, OFFSET_STRIDE):
+                        for s in np.linspace(SCALE_RANGE[0], SCALE_RANGE[1], SCALE_RANGE[2], endpoint=True):
+                            size = (int(STD_POI_SIZE[0] * s), int(STD_POI_SIZE[1] * s))
+                            resized_poi_icon = info.get_resized_image(size)
+                            poi_img = bg.copy()
+                            poi_img.alpha_composite(resized_poi_icon, (dx, dy))
+                            poi_img = np.array(poi_img)[..., :3]
+                            poi_img = cv2.resize(poi_img, DOWNSAMPLE_SIZE, interpolation=CV2_RESIZE_METHOD)
+                            target_imgs.append(poi_img[h_min:h_max, w_min:w_max])
+                return np.array(target_imgs).astype(np.float32)
 
-            target_imgs = np.array(target_imgs).astype(np.float32)
+            target_imgs = self._poi_templates.get((background_key, poi_key), make_templates)
             diffs = np.mean((target_imgs - img_for_poi.astype(np.float32)) ** 2, axis=(1, 2, 3))
             min_idx = np.argmin(diffs)
             poi_key_score = diffs[min_idx]
@@ -555,8 +564,9 @@ class MapDetector:
         nightlord, _ = self._match_nightlord(img)
 
         # 校准偏移
-        map_bg = open_cv2_image(f"maps_poi_match/{MAG_BG_FOR_POI_MATCH_INDEX_MAP[earth_shifting]}.jpg")
-        map_bg = cv2.resize(map_bg, STD_MAP_SIZE, interpolation=CV2_RESIZE_METHOD)
+        bg_path = f"maps_poi_match/{MAG_BG_FOR_POI_MATCH_INDEX_MAP[earth_shifting]}.jpg"
+        map_bg = self._resources.get((bg_path, STD_MAP_SIZE), lambda: cv2.resize(
+            open_cv2_image(bg_path), STD_MAP_SIZE, interpolation=CV2_RESIZE_METHOD))
         try:
             align_t = time.time()
             ALIGN_REGION = (
@@ -572,7 +582,7 @@ class MapDetector:
 
         # 识别POI
         poi_result: dict[Position, int] = {}
-        poi_result_img = img.copy()    # for debug
+        poi_result_img = img.copy() if diagnostics_enabled() else None
 
         all_poi_pos = set() # 收集所有待匹配POI点
         nightlords = [nightlord] if nightlord is not None else self.info.all_nightlords
@@ -589,12 +599,14 @@ class MapDetector:
             poi_result[(x, y)] = ctype
 
             # 绘制调试图
-            paste_cv2(poi_result_img, np.array(self.all_poi_images[ctype])[..., :3], (x-STD_POI_SIZE[0]//2, y-STD_POI_SIZE[1]//2))
-            cv2.circle(poi_result_img, (x, y), 2, (255, 0, 0), 3)
+            if poi_result_img is not None:
+                paste_cv2(poi_result_img, np.array(self.all_poi_images[ctype])[..., :3], (x-STD_POI_SIZE[0]//2, y-STD_POI_SIZE[1]//2))
+                cv2.circle(poi_result_img, (x, y), 2, (255, 0, 0), 3)
 
         # 保存结果用于调试
-        cv2.imwrite(get_appdata_path(f"map.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(get_appdata_path(f"map_poi_result.jpg"), cv2.cvtColor(poi_result_img, cv2.COLOR_RGB2BGR))
+        if poi_result_img is not None:
+            cv2.imwrite(get_appdata_path("map.jpg"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(get_appdata_path("map_poi_result.jpg"), cv2.cvtColor(poi_result_img, cv2.COLOR_RGB2BGR))
 
         # 匹配地图模式
         EMPTY_CONSTRUCTION = Construct(type=0, pos=0, is_display=False)
@@ -648,6 +660,24 @@ class MapDetector:
 
     def _draw_overlay_image(self, match_result: MapPatternMatchResult, draw_size: tuple[int, int], result_index: int) -> Image.Image:
         pattern = match_result.pattern
+        draw_size = tuple(draw_size)
+        # Cached layers are immutable. Always return a copy for inference captions.
+        img = self._overlay_layers.get((pattern.id, draw_size),
+            lambda: self._draw_overlay_base(pattern, draw_size)).copy()
+        text = f"#{pattern.id}"
+        if match_result.error is not None:
+            text += f" (#{result_index+1} E:{match_result.error})"
+        text += f"  {self.info.get_name(pattern.earth_shifting + 200000) or str(pattern.earth_shifting + 200000)} - {self.info.get_name(pattern.nightlord + 100000) or str(pattern.nightlord + 100000)}"
+        if match_result.nightlord is None:
+            text += " (隐藏夜王)"
+        scale = draw_size[0] / 750
+        draw_text(img, (int(20*scale), int(10*scale)), text, int(22*scale),
+                  (255, 255, 255, 255), int(3*scale), (0, 0, 0, 255), 'lt')
+        if diagnostics_enabled():
+            img.convert('RGB').save(get_appdata_path(f"map_overlay_result_{result_index}.jpg"))
+        return img
+
+    def _draw_overlay_base(self, pattern: MapPattern, draw_size: tuple[int, int]) -> Image.Image:
 
         def scale_size(p: int | float | Position) -> int | Position:
             # 以750x750为标准尺寸
@@ -656,7 +686,8 @@ class MapDetector:
             return (int(p[0] * draw_size[0] / 750), int(p[1] * draw_size[1] / 750))
 
         def open_with_draw_size(path: str, size: tuple[int, int]) -> Image.Image:
-            return open_pil_image(path, scale_size(size))
+            size = scale_size(size)
+            return self._resources.get((path, size), lambda: open_pil_image(path, size))
 
         def get_name(ctype: int) -> str:
             return self.info.get_name(ctype) or str(ctype)
@@ -850,15 +881,7 @@ class MapDetector:
             texts.append(((pos[0], pos[1] + scale_size(20)), "庇佑", FONT_SIZE_SMALL, (255, 200, 200, 255), OUTLINE_W_SMALL, OUTLINE_COLOR))
 
         # 说明文本
-        info_text_y_offset = 0
-        text = f"#{pattern.id}"
-        if match_result.error is not None:
-            text += f" (#{result_index+1} E:{match_result.error})"
-        text += f"  {get_name(pattern.earth_shifting + 200000)} - {get_name(pattern.nightlord + 100000)}"
-        if match_result.nightlord is None:
-            text += " (隐藏夜王)"
-        texts.append((scale_size((20, 10)), text, scale_size(22), (255, 255, 255, 255), scale_size(3), OUTLINE_COLOR, 'lt'))
-        info_text_y_offset += 28
+        info_text_y_offset = 28  # The changing result header is drawn on the cached layer.
 
         # 大空洞第二天缩圈位置
         if pattern.earth_shifting == 4:
@@ -876,9 +899,6 @@ class MapDetector:
         for text in texts:  draw_text(img, *text)
 
         info(f"Draw overlay image size: {draw_size} time cost: {time.time() - t:.4f}s")
-
-        # 保存结果用于调试
-        img.convert('RGB').save(get_appdata_path(f"map_overlay_result_{result_index}.jpg"))
 
         return img
 
@@ -930,6 +950,7 @@ class MapDetector:
                     else:
                         ret.inference_message = f"地图推测：{count} 地标存在冲突，请继续探索或清空"
             else:
+                ret.earth_shifting = param.earth_shifting
                 results = self._match_map_pattern(img, param.earth_shifting, topk=param.return_pattern_topk)
 
             # 决定信息绘制大小
@@ -957,7 +978,9 @@ class MapDetector:
                                   outline_width=max(1, int(2 * caption_scale)))
                     ret.overlay_images.append(overlay_img)
                     ret.patterns.append(result.pattern)
-                    gc.collect()
+                    if param.on_progress is not None and i < len(results) - 1:
+                        param.on_progress(replace(ret, img=None, rendering_complete=False,
+                            patterns=list(ret.patterns), overlay_images=list(ret.overlay_images)))
                 except Exception as e:
                     error(f"MapDetector: Draw overlay image of pattern {result.pattern.id} failed: {e}")
 

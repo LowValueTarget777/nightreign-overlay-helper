@@ -1422,6 +1422,7 @@ class SettingsWindow(QWidget):
     def update_map_detect_enable(self, state):
         enabled = self.map_detect_enable_checkbox.isChecked()
         self.updater.map_detect_enabled = enabled
+        self.updater.set_to_detect_map_pattern_once()
         info(f"Map detect enabled: {enabled}")
 
     def show_capture_map_region_tutorial(self):

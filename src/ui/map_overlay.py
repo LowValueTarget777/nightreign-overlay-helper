@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QRect, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QProgressBar, 
     QLabel, QHBoxLayout, QSizePolicy, QStackedLayout,
@@ -53,7 +53,9 @@ class MapOverlayWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         set_widget_always_on_top(self)
-        self.startTimer(50)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(lambda: self.timerEvent(None))
+        self._layout_size = None
 
         # 悬浮地图信息
         self.map_pattern_idx: int | None = None
@@ -153,6 +155,7 @@ class MapOverlayWidget(QWidget):
             if self.map_pattern_idx >= len(self.overlay_images):
                 self.map_pattern_idx = 0
             self.update_overlay_images()
+            self.timerEvent(None)
 
     def last_overlay_image(self):
         if self.visible and self.overlay_images is not None:
@@ -160,6 +163,7 @@ class MapOverlayWidget(QWidget):
             if self.map_pattern_idx < 0:
                 self.map_pattern_idx = len(self.overlay_images) - 1
             self.update_overlay_images()
+            self.timerEvent(None)
 
 
     def init_crystal_layout_imgs(self):
@@ -248,6 +252,7 @@ class MapOverlayWidget(QWidget):
             if self.crystal_layout_idx >= len(self.crystal_layout_imgs):
                 self.crystal_layout_idx = 0
             self.update_crystal_layout()
+            self.timerEvent(None)
 
     def last_crystal_layout(self):
         if self.visible and self.crystal_layout_idx is not None:
@@ -255,6 +260,7 @@ class MapOverlayWidget(QWidget):
             if self.crystal_layout_idx < 0:
                 self.crystal_layout_idx = len(self.crystal_layout_imgs) - 1
             self.update_crystal_layout()
+            self.timerEvent(None)
 
 
     def update_ui_state(self, state: MapOverlayUIState):
@@ -284,26 +290,50 @@ class MapOverlayWidget(QWidget):
         if state.display_crystal_layout is not None:
             self.crystal_layout_idx = 0 if state.display_crystal_layout else None
             self.update_crystal_layout()
-        self.update()
+        self.timerEvent(None)
 
     def timerEvent(self, event):
+        # Fade and visibility must still progress when the widget is hidden.
+        real_opacity = self.windowOpacity()
+        dlt = self.target_opacity - real_opacity
+        if abs(dlt) > 0.01:
+            real_opacity += dlt * 0.6
+            self.setWindowOpacity(real_opacity)
+        elif dlt:
+            real_opacity = self.target_opacity
+            self.setWindowOpacity(real_opacity)
+        visible = self.visible and real_opacity > 0.01
+        if self.only_show_when_game_foreground:
+            visible = visible and (self.is_game_foreground or self.is_menu_opened or self.is_setting_opened)
+        if visible != self.isVisible():
+            self.setVisible(visible)
+        fading = abs(self.target_opacity - real_opacity) > 0.001
+        interval = 50 if fading else (250 if self.map_pattern_matching else 1000)
+        if visible or fading:
+            if not self._refresh_timer.isActive() or self._refresh_timer.interval() != interval:
+                self._refresh_timer.start(interval)
+        else:
+            self._refresh_timer.stop()
+            return
+
         w, h = self.width(), self.height()
-        self.overlay_image_box.setGeometry(0, 0, w, h)
-        self.crystal_layout_image_box.setGeometry(0, 0, w, h)
-
         font_size = max(8, 24 * h // 750)
-
-        # 更新vbox
-        margin = int(font_size * 0.5)
-        self.vbox.setContentsMargins(margin, margin, margin, margin)
-        self.vbox.setSpacing(margin // 2)
+        if self._layout_size != (w, h):
+            self._layout_size = (w, h)
+            self.overlay_image_box.setGeometry(0, 0, w, h)
+            self.crystal_layout_image_box.setGeometry(0, 0, w, h)
+            margin = int(font_size * 0.5)
+            self.vbox.setContentsMargins(margin, margin, margin, margin)
+            self.vbox.setSpacing(margin // 2)
+            for label in (self.map_pattern_label, self.crystal_layout_label, self.match_time_label):
+                label.setStyleSheet(f"color: white; font-size: {font_size}px;")
 
         # 更新地图序号标签
         map_pattern_text = ""
         if self.overlay_images is not None and self.map_pattern_idx is not None:
             map_pattern_text = f"识别结果: {self.map_pattern_idx + 1}/{len(self.overlay_images)}"
-        self.map_pattern_label.setText(map_pattern_text)
-        self.map_pattern_label.setStyleSheet(f"color: white; font-size: {font_size}px;")
+        if self.map_pattern_label.text() != map_pattern_text:
+            self.map_pattern_label.setText(map_pattern_text)
 
         # 更新水晶布局标签
         crystal_layout_text = ""
@@ -314,8 +344,8 @@ class MapOverlayWidget(QWidget):
             else:
                 crystal_layout_text += f"{self.crystal_layout_idx}"
             crystal_layout_text += f"/{len(self.crystal_layout_imgs) - 1}"
-        self.crystal_layout_label.setText(crystal_layout_text)
-        self.crystal_layout_label.setStyleSheet(f"color: white; font-size: {font_size}px;")
+        if self.crystal_layout_label.text() != crystal_layout_text:
+            self.crystal_layout_label.setText(crystal_layout_text)
 
         # 更新识别时间标签
         match_time_text = ""
@@ -325,28 +355,8 @@ class MapOverlayWidget(QWidget):
         elif self.map_pattern_match_time > 0:
             elapsed = time.time() - self.map_pattern_match_time
             match_time_text = f"识别时间：{get_readable_timedelta(timedelta(seconds=elapsed))}前"
-        self.match_time_label.setText(match_time_text)
-        self.match_time_label.setStyleSheet(f"color: white; font-size: {font_size}px;")
-
-        # 更新透明度
-        threshold = 0.01
-        step = 0.6
-        real_opacity = self.windowOpacity()
-        dlt = self.target_opacity - real_opacity
-        if abs(dlt) > threshold:
-            real_opacity += dlt * step
-            self.setWindowOpacity(real_opacity)
-        elif 0 < abs(dlt) <= threshold:
-            real_opacity = self.target_opacity
-            self.setWindowOpacity(real_opacity)
-
-        visible = self.visible and real_opacity > 0.01
-        if self.only_show_when_game_foreground:
-            visible = visible and (self.is_game_foreground or self.is_menu_opened or self.is_setting_opened)
-        if visible and not self.isVisible():
-            self.show()
-        elif not visible and self.isVisible():
-            self.hide()
+        if self.match_time_label.text() != match_time_text:
+            self.match_time_label.setText(match_time_text)
 
 
 

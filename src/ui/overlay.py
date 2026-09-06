@@ -11,6 +11,7 @@ from src.common import APP_FULLNAME, APP_AUTHOR
 from src.config import Config
 from src.logger import info, warning, error
 from src.ui.utils import set_widget_always_on_top
+from src.ui.state import scalar_changes
 
 
 INITIAL_TEXT = f"{APP_FULLNAME} (右键打开菜单)"
@@ -61,7 +62,6 @@ class OverlayWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         set_widget_always_on_top(self)
-        self.startTimer(50)
 
         self.scale = 1.0
         
@@ -222,6 +222,9 @@ class OverlayWidget(QWidget):
         self.art_pb.setStyleSheet(self.art_pb_css.replace("{border_radius}", str(pb_border_radius)).replace("{color}", self.art_color))
 
     def update_ui_state(self, state: OverlayUIState):
+        state = scalar_changes(self, state)
+        if state is None:
+            return
         if state.x is not None and state.y is not None:
             self.move(state.x, state.y)
         if state.set_x_to_center:
@@ -274,7 +277,7 @@ class OverlayWidget(QWidget):
             self.is_setting_opened = state.is_setting_opened
         if state.hide_text is not None:
             self.hide_text = state.hide_text
-        self.update()
+        self.timerEvent(None)
 
     def timerEvent(self, event):
         visible = self.visible and self.windowOpacity() > 0.01

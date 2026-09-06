@@ -8,7 +8,7 @@ from src.screencap import ScreencapEngine
 
 from src.config import Config
 from src.common import get_data_path, get_appdata_path
-from src.logger import info, warning, error
+from src.logger import info, warning, error, diagnostics_enabled
 from src.detector.utils import grab_region, resize_by_height_keep_aspect_ratio, match_template
 
 @dataclass
@@ -58,7 +58,8 @@ class ArtDetector:
             info(f"Art type: {art_type}, score: {score:.4f}")
         
         # 保存用于调试
-        cv2.imwrite(get_appdata_path("last_art_sc.png"), cv2.cvtColor(sc, cv2.COLOR_RGB2BGR))
+        if diagnostics_enabled():
+            cv2.imwrite(get_appdata_path("last_art_sc.png"), cv2.cvtColor(sc, cv2.COLOR_RGB2BGR))
 
         if best_score < config.art_detect_threshold:
             ret.art_type = best_art_type

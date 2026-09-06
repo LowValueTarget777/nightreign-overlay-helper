@@ -21,6 +21,7 @@ from src.detector import (
     ArtDetectParam,
 )
 from src.detector.map_info import MapPattern
+from src.detector.map_jobs import MapJobs
 from src.ui.utils import is_window_in_foreground
 from src.screencap import (
     get_engine,
@@ -81,6 +82,10 @@ class Updater(QObject):
         self.is_menu_opened = False
 
         self.detector = DetectorManager(get_engine())
+        self._map_jobs = MapJobs()
+        self._map_epoch = 0
+        self._map_request_version = 0
+        self._map_context_seen = None
         self.screencap_mode: ScreencapMode = ScreencapMode.AUTO
         self.only_detect_when_game_foreground: bool = False
         self.detect_interval = 0.2
@@ -296,6 +301,7 @@ class Updater(QObject):
     # =============== Map Pattern Management =============== #
 
     def set_to_detect_map_pattern_once(self):
+        self._map_request_version = getattr(self, '_map_request_version', 0) + 1
         self.do_match_map_pattern_flag = DoMatchMapPatternFlag.PREPARE
         info("Set to detect map pattern once.")
 
@@ -376,27 +382,63 @@ class Updater(QObject):
         self._reset_partial_requested = True
 
     def _detect_partial_map(self, map_img, is_full_map):
-        if self.get_time() - self.last_map_pattern_match_time >= 5:
+        if not self._map_jobs.busy and self.get_time() - self.last_map_pattern_match_time >= 5:
             self.set_to_detect_map_pattern_once()
             self.last_map_pattern_match_time = self.get_time()
         if self.do_match_map_pattern_flag == DoMatchMapPatternFlag.PREPARE:
             self.do_match_map_pattern_flag = DoMatchMapPatternFlag.TRUE
             self.update_map_overlay_images(None, preserve_selection=True)
             return
-        if not is_full_map or self.do_match_map_pattern_flag != DoMatchMapPatternFlag.TRUE:
+        if not is_full_map or self._map_jobs.busy or self.do_match_map_pattern_flag != DoMatchMapPatternFlag.TRUE:
             return
-        self.do_match_map_pattern_flag = DoMatchMapPatternFlag.FALSE
-        result = self.detector.detect(DetectParam(map_detect_param=MapDetectParam(
+        self._submit_map_job(MapDetectParam(
             map_region=self.map_region, img=map_img, infer_partial=True,
             return_pattern_topk=self.map_pattern_return_topk,
-        ))).map_detect_result
-        self.partial_map_message = result.inference_message or "地图推测：等待探索"
-        info(self.partial_map_message)
-        self.update_map_overlay_images(result.overlay_images or None,
-                                       candidate_ids=[p.id for p in result.patterns or []],
-                                       preserve_selection=True)
+        ))
+
+    def _map_context(self):
+        return (self._map_request_version, self._map_epoch, self._partial_game_hwnd,
+                tuple(self.map_region or ()), self.partial_map_enabled, self.map_detect_enabled,
+                self.map_pattern_return_topk, self.hdr_processing_enabled)
+
+    def _submit_map_job(self, param):
+        if self._map_jobs.submit(param, self._map_context(), self._map_epoch):
+            self.do_match_map_pattern_flag = DoMatchMapPatternFlag.FALSE
+            self.last_map_pattern_match_time = self.get_time()
+            self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(map_pattern_matching=True))
+
+    def _poll_map_job(self):
+        context = self._map_context()
+        # Geometry/options can change directly through settings while a job runs.
+        if context[1:] != self._map_context_seen:
+            if self._map_context_seen is not None:
+                self.set_to_detect_map_pattern_once()
+                context = self._map_context()
+            self._map_context_seen = context[1:]
+        try:
+            completed = self._map_jobs.poll(context)
+        except Exception as exc:
+            error(f"Map matching failed: {exc}")
+            self.update_map_overlay_images(None)
+            self.set_to_detect_map_pattern_once()
+            return
+        if completed is None:
+            return
+        param, result = completed
+        if param.infer_partial:
+            self.partial_map_message = result.inference_message or "地图推测：等待探索"
+            info(self.partial_map_message)
+            self.update_map_overlay_images(result.overlay_images or None,
+                candidate_ids=[p.id for p in result.patterns or []], preserve_selection=True)
+        else:
+            self.update_map_overlay_images(result.overlay_images or None, earth_shifting=result.earth_shifting,
+                candidate_ids=[p.id for p in result.patterns or []], preserve_selection=True)
+            if result.earth_shifting is None:
+                self.do_match_map_pattern_flag = DoMatchMapPatternFlag.TRUE
         self.last_map_pattern_match_time = self.get_time()
         self.update_overlay_match_map_pattern_text()
+        if not result.rendering_complete:
+            self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(map_pattern_matching=True))
 
     def detect_and_update_map(self):
         hwnd = get_engine()._capture_hwnd
@@ -405,6 +447,7 @@ class Updater(QObject):
             self._reset_partial_requested = True
         if self._reset_partial_requested:
             self._reset_partial_requested = False
+            self._map_epoch = getattr(self, '_map_epoch', 0) + 1
             self.detector.map_detector.partial_inference = None
             self.update_map_overlay_images(None)
             self.partial_map_message = "地图推测：等待探索"
@@ -412,6 +455,8 @@ class Updater(QObject):
         if not self.map_detect_enabled:
             self.hide_map_overlay()
             return
+
+        self._poll_map_job()
    
         param = DetectParam(
             map_detect_param=MapDetectParam(
@@ -451,44 +496,13 @@ class Updater(QObject):
             self.update_map_overlay_images(None)
             info("Hide overlay and prepared to detect map pattern.")
 
-        elif self.do_match_map_pattern_flag == DoMatchMapPatternFlag.TRUE and is_full_map:
-            # 特殊地形识别成功才进行匹配（避免地图半透明时就识别）
-            result = self.detector.detect(DetectParam(
-                map_detect_param=MapDetectParam(
-                    map_region=self.map_region,
-                    img=map_img,    # 使用之前截取的图片，避免处理过程中画面变化
-                    do_match_earth_shifting=True,
-                    hdr_processing_enabled=self.hdr_processing_enabled,
-                )
+        elif (self.do_match_map_pattern_flag == DoMatchMapPatternFlag.TRUE
+              and is_full_map and not self._map_jobs.busy):
+            self._submit_map_job(MapDetectParam(
+                map_region=self.map_region, img=map_img, do_match_pattern=True,
+                hdr_processing_enabled=self.hdr_processing_enabled,
+                return_pattern_topk=self.map_pattern_return_topk,
             ))
-            earth_shifting = result.map_detect_result.earth_shifting
-            if earth_shifting is not None:
-                # 进行匹配
-                self.do_match_map_pattern_flag = DoMatchMapPatternFlag.FALSE
-                self.update_map_overlay_ui_state_signal.emit(MapOverlayUIState(
-                    clear_image=True,
-                    map_pattern_matching=True,
-                    x=self.map_region[0],
-                    y=self.map_region[1],
-                    w=self.map_region[2],
-                    h=self.map_region[3],
-                    opacity=1.0,
-                ))
-                self.update_overlay_ui_state_signal.emit(OverlayUIState(
-                    map_pattern_match_text="",
-                ))
-                result = self.detector.detect(DetectParam(
-                    map_detect_param=MapDetectParam(
-                        map_region=self.map_region,
-                        img=map_img,
-                        earth_shifting=earth_shifting,
-                        do_match_pattern=True,
-                        hdr_processing_enabled=self.hdr_processing_enabled,
-                        return_pattern_topk=self.map_pattern_return_topk,
-                    )
-                ))
-                self.update_map_overlay_images(result.map_detect_result.overlay_images, earth_shifting=earth_shifting)
-                self.last_map_pattern_match_time = self.get_time()
 
     # =============== HP Management =============== #
 
@@ -621,6 +635,15 @@ class Updater(QObject):
 
     def check_game_foreground(self) -> bool:
         is_foreground = is_window_in_foreground(GAME_WINDOW_TITLE)
+
+        block_input = self.only_detect_when_game_foreground and not (
+            is_foreground or self.is_setting_opened or self.is_menu_opened)
+        if getattr(self, '_last_input_block', None) != block_input:
+            self._last_input_block = block_input
+            self.input_block_signals_signal.emit(block_input)
+        if getattr(self, '_last_foreground', None) == is_foreground:
+            return is_foreground
+        self._last_foreground = is_foreground
         
         self.update_overlay_ui_state_signal.emit(OverlayUIState(
             is_game_foreground=is_foreground,
@@ -633,9 +656,6 @@ class Updater(QObject):
         ))
         self.game_foreground_changed.emit(is_foreground)
 
-        self.input_block_signals_signal.emit(self.only_detect_when_game_foreground and \
-            not (is_foreground or self.is_setting_opened or self.is_menu_opened))
-        
         return is_foreground
 
     def run(self):
@@ -674,6 +694,7 @@ class Updater(QObject):
 
                 capture_ready = engine.status == EngineStatus.CONNECTED
                 if not capture_ready:
+                    self._reset_partial_requested = True
                     self.hide_map_overlay()
                     self.current_is_full_map = False
                     self.hp_overlay_ui_state_signal.emit(HpOverlayUIState(visible=False))
@@ -711,6 +732,8 @@ class Updater(QObject):
             error(f"Exception in updater run: {e}")
         finally:
             self._running = False
+            if jobs := getattr(self, '_map_jobs', None):
+                jobs.close()
             try:
                 get_engine().shutdown()
             except Exception as e:

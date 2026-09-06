@@ -11,6 +11,7 @@ from src.common import APP_FULLNAME, APP_AUTHOR
 from src.config import Config
 from src.logger import info, warning, error
 from src.ui.utils import set_widget_always_on_top, region_to_qt_region
+from src.ui.state import scalar_changes
 
 
 @dataclass
@@ -41,7 +42,6 @@ class HpOverlayWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         set_widget_always_on_top(self)
-        self.startTimer(50)
 
         self.hpbar_region: tuple[int] = (0, 0, 10, 10)
 
@@ -67,6 +67,15 @@ class HpOverlayWidget(QWidget):
         self.update_ui_state(HpOverlayUIState(visible=False))
         
     def update_ui_state(self, state: HpOverlayUIState):
+        cfg = Config.get()
+        geometry_key = (self.devicePixelRatio(), cfg.hpbar_low_hp_marker, cfg.hpbar_high_hp_marker)
+        state = scalar_changes(self, state)
+        if state is None:
+            if geometry_key != getattr(self, '_marker_geometry_key', None):
+                self._marker_geometry_key = geometry_key
+                self.timerEvent(None)
+            return
+        self._marker_geometry_key = geometry_key
         if state.x is not None:
             self.hpbar_region = region_to_qt_region((state.x, state.y, state.w, state.h))
         if state.visible is not None:
@@ -79,7 +88,7 @@ class HpOverlayWidget(QWidget):
             self.is_menu_opened = state.is_menu_opened
         if state.is_setting_opened is not None:
             self.is_setting_opened = state.is_setting_opened
-        self.update()
+        self.timerEvent(None)
 
     def timerEvent(self, event):
         line_height = int(self.LINE_HEIGHT / self.devicePixelRatio())
@@ -109,4 +118,3 @@ class HpOverlayWidget(QWidget):
         elif not visible and self.isVisible():
             self.hide()
 
-        

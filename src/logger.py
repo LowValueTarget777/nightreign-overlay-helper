@@ -36,6 +36,10 @@ def debug(msg: str):
         _logger = setup_logger()
     _logger.debug(msg)
 
+
+def diagnostics_enabled() -> bool:
+    return _logger is not None and _logger.isEnabledFor(DEBUG)
+
 def info(msg: str):
     global _logger
     if _logger is None:

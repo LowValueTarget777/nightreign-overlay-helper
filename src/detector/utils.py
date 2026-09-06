@@ -141,11 +141,14 @@ def _apply_processing(img: Image.Image, processing: str, region) -> Image.Image:
     return img
 
 
-def _crop_frame(full_array: np.ndarray, left: int, top: int, width: int, height: int, region) -> Image.Image:
-    if full_array.ndim < 2 or full_array.size == 0:
+def _crop_frame(full_array: np.ndarray | Image.Image, left: int, top: int, width: int, height: int, region) -> Image.Image:
+    is_image = isinstance(full_array, Image.Image)
+    if (is_image and (full_array.width <= 0 or full_array.height <= 0)) or (
+        not is_image and (full_array.ndim < 2 or full_array.size == 0)
+    ):
         raise ScreencapRuntimeError("invalid_frame", "Captured frame is empty.")
 
-    frame_height, frame_width = full_array.shape[:2]
+    frame_width, frame_height = full_array.size if is_image else full_array.shape[1::-1]
     right = left + width
     bottom = top + height
     if left < 0 or top < 0 or right < 0 or right > frame_width or bottom > frame_height:
@@ -155,6 +158,8 @@ def _crop_frame(full_array: np.ndarray, left: int, top: int, width: int, height:
             f"outside frame {frame_width}x{frame_height}.",
         )
 
+    if is_image:
+        return full_array.crop((left, top, right, bottom))
     cropped = full_array[top:bottom, left:right]
     if cropped.size == 0:
         raise ScreencapRuntimeError("empty_region", f"Region {region} produced an empty image.")
@@ -178,7 +183,8 @@ def grab_region(engine: ScreencapEngine, region: tuple[int, int, int, int], proc
         raise ValueError(f"Invalid region size: w={w}, h={h}")
 
     full_img = engine.grab_fullscreen()
-    full_array = np.array(full_img)
+    # Crop before converting: most detectors only need a tiny part of a frame.
+    full_array = full_img
 
     origin = full_img.info.get("screen_origin")
     if origin is not None:
@@ -228,7 +234,8 @@ def get_text_size(font: ImageFont.FreeTypeFont, text: str) -> tuple[int, int]:
 def draw_icon(img: Image.Image, pos: tuple[int, int], icon: Image.Image, size: tuple[int, int] | None = None):
     if size is None:
         size = icon.size
-    icon = icon.resize(size, resample=Image.Resampling.BICUBIC)
+    if size != icon.size:
+        icon = icon.resize(size, resample=Image.Resampling.BICUBIC)
     img.alpha_composite(icon, (pos[0] - size[0] // 2, pos[1] - size[1] // 2))
 
 
