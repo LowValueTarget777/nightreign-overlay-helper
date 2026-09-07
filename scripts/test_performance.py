@@ -20,7 +20,6 @@ from src.performance import ByteCache
 from src.detector.utils import grab_region
 from src.detector.map_detector import MapDetector, MapDetectParam, MapDetectResult, MapPatternMatchResult
 from src.detector.map_jobs import MapJobs
-from src.detector.partial_map import LandmarkEvidence
 from src.screencap.errors import ScreencapRuntimeError
 from src.ui.overlay import OverlayWidget, OverlayUIState
 from src.ui.map_overlay import MapOverlayWidget, MapOverlayUIState
@@ -68,26 +67,11 @@ class CacheAndPixels(unittest.TestCase):
         self.assertEqual(updated.tobytes(), detector._draw_overlay_image(second, (750, 750), 2).tobytes())
         self.assertLessEqual(detector._overlay_layers.bytes, detector._overlay_layers.max_bytes)
 
-    def test_ranking_reuses_only_unchanged_evidence(self):
-        evidence = LandmarkEvidence()
-        patterns = [NS(id=1, pos_constructions={(1, 1): NS(type=30)}),
-                    NS(id=2, pos_constructions={(1, 1): NS(type=40)})]
-        identity = lambda value: value
-        for _ in range(2): evidence.observe({(1, 1): 30})
-        original = evidence.rank(patterns, identity)
-        evidence.observe({})
-        self.assertIs(original, evidence.rank(patterns, identity))
-        for _ in range(2): evidence.observe({(1, 1): 40})
-        self.assertEqual(evidence.rank(patterns, identity)[0][0].id, 2)
-        evidence.clear()
-        self.assertEqual(evidence.rank(patterns, identity)[0][1:], (0, 0))
-
 
 class WorkerContracts(unittest.TestCase):
     def test_first_candidate_is_available_before_the_job_finishes(self):
         started, release = threading.Event(), threading.Event()
         class Detector:
-            partial_inference = None
             def detect(self, engine, param):
                 param.on_progress(MapDetectResult(rendering_complete=False,
                     overlay_images=[Image.new('RGBA', (2, 2))]))
@@ -95,9 +79,9 @@ class WorkerContracts(unittest.TestCase):
                 release.wait(3)
                 return MapDetectResult(rendering_complete=True)
         jobs = MapJobs(Detector)
-        param = MapDetectParam(map_region=(0, 0, 2, 2), img=np.zeros((2, 2, 3)), infer_partial=True)
+        param = MapDetectParam(map_region=(0, 0, 2, 2), img=np.zeros((2, 2, 3)), do_match_pattern=True, earth_shifting=0)
         try:
-            jobs.submit(param, 'current', 0)
+            jobs.submit(param, 'current')
             self.assertTrue(started.wait(3))
             progress = jobs.poll('current')[1]
             self.assertFalse(progress.rendering_complete)
@@ -114,10 +98,9 @@ class WorkerContracts(unittest.TestCase):
     def test_updater_rejects_results_after_region_changes(self):
         from src.updater import Updater, DoMatchMapPatternFlag
         from unittest.mock import Mock
-        jobs = MapJobs(lambda: NS(partial_inference=None,
-                                 detect=lambda *_: MapDetectResult(earth_shifting=0)))
+        jobs = MapJobs(lambda: NS(detect=lambda *_: MapDetectResult(earth_shifting=0)))
         holder = NS(_map_jobs=jobs, _map_request_version=0, _map_epoch=1,
-                    _partial_game_hwnd=1, map_region=(0, 0, 2, 2), partial_map_enabled=False,
+                    _map_game_hwnd=1, map_region=(0, 0, 2, 2),
                     map_detect_enabled=True, map_pattern_return_topk=1, hdr_processing_enabled=False,
                     update_map_overlay_images=Mock())
         holder._map_context = lambda: Updater._map_context(holder)
@@ -126,7 +109,7 @@ class WorkerContracts(unittest.TestCase):
         param = MapDetectParam(map_region=holder.map_region, img=np.zeros((2, 2, 3)),
                                do_match_pattern=True, earth_shifting=0)
         try:
-            jobs.submit(param, holder._map_context(), holder._map_epoch)
+            jobs.submit(param, holder._map_context())
             jobs._future.result(timeout=3)
             holder.map_region = (10, 10, 2, 2)
             Updater._poll_map_job(holder)
@@ -140,23 +123,22 @@ class WorkerContracts(unittest.TestCase):
         seen = []
 
         class Detector:
-            partial_inference = None
             def detect(self, engine, param):
                 seen.append(param.img.copy())
-                param.on_progress(MapDetectResult(rendering_complete=False, inference_message='partial'))
+                param.on_progress(MapDetectResult(rendering_complete=False, earth_shifting=0))
                 started.set()
                 if not release.wait(3):
                     raise TimeoutError('test worker not released')
-                return MapDetectResult(inference_message='done')
+                return MapDetectResult(earth_shifting=0)
 
         jobs = MapJobs(Detector)
         pixels = np.zeros((20, 20, 3), dtype='uint8')
-        param = MapDetectParam(map_region=(0, 0, 20, 20), img=pixels, infer_partial=True)
+        param = MapDetectParam(map_region=(0, 0, 20, 20), img=pixels, do_match_pattern=True, earth_shifting=0)
         try:
-            self.assertTrue(jobs.submit(param, 'old', 1))
+            self.assertTrue(jobs.submit(param, 'old'))
             self.assertTrue(started.wait(3))
             pixels[:] = 255
-            self.assertFalse(jobs.submit(param, 'new', 1))
+            self.assertFalse(jobs.submit(param, 'new'))
             self.assertIsNone(jobs.poll('new'))  # Old progress is discarded too.
             self.assertTrue(jobs.busy)
             release.set()
@@ -168,30 +150,27 @@ class WorkerContracts(unittest.TestCase):
             release.set()
             jobs.close()
 
-    def test_evidence_reset_and_exception_recovery(self):
-        resets = []
+    def test_exception_recovery_reuses_worker(self):
+        calls = []
         class Detector:
-            partial_inference = None
             def detect(self, engine, param):
-                resets.append(self.partial_inference)
-                self.partial_inference = 'confirmed'
-                if len(resets) == 1:
+                calls.append(self)
+                if len(calls) == 1:
                     raise ValueError('bad frame')
-                return MapDetectResult(inference_message='done')
+                return MapDetectResult(earth_shifting=0)
         jobs = MapJobs(Detector)
-        param = MapDetectParam(map_region=(0, 0, 2, 2), img=np.zeros((2, 2, 3)), infer_partial=True)
+        param = MapDetectParam(map_region=(0, 0, 2, 2), img=np.zeros((2, 2, 3)),
+                               do_match_pattern=True, earth_shifting=0)
         try:
-            for epoch in (1, 1, 2):
-                self.assertTrue(jobs.submit(param, epoch, epoch))
-                try:
-                    jobs._future.result(timeout=3)
-                except ValueError:
-                    pass
-                if len(resets) == 1:
-                    with self.assertRaises(ValueError): jobs.poll(epoch)
+            for request in (1, 2):
+                self.assertTrue(jobs.submit(param, request))
+                if request == 1:
+                    with self.assertRaises(ValueError): jobs._future.result(timeout=3)
+                    with self.assertRaises(ValueError): jobs.poll(request)
                 else:
-                    self.assertEqual(jobs.poll(epoch)[1].inference_message, 'done')
-            self.assertEqual(resets, [None, 'confirmed', None])
+                    jobs._future.result(timeout=3)
+                    self.assertEqual(jobs.poll(request)[1].earth_shifting, 0)
+            self.assertIs(calls[0], calls[1])
         finally:
             jobs.close()
 
@@ -201,7 +180,6 @@ class WorkerContracts(unittest.TestCase):
         from src.screencap import EngineStatus
         release, started = threading.Event(), threading.Event()
         class Detector:
-            partial_inference = None
             def detect(self, engine, param):
                 started.set()
                 release.wait(3)
@@ -212,8 +190,8 @@ class WorkerContracts(unittest.TestCase):
         updater = Updater(Mock(), overlay, map_, hp)
         updater._map_jobs.close()
         updater._map_jobs = MapJobs(Detector)
-        param = MapDetectParam(map_region=(0, 0, 2, 2), img=np.zeros((2, 2, 3)), infer_partial=True)
-        updater._map_jobs.submit(param, 'active', 0)
+        param = MapDetectParam(map_region=(0, 0, 2, 2), img=np.zeros((2, 2, 3)), do_match_pattern=True, earth_shifting=0)
+        updater._map_jobs.submit(param, 'active')
         self.assertTrue(started.wait(3))
         ticks = []
         updater.detect_and_update_all = lambda: None

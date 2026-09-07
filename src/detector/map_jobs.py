@@ -1,4 +1,4 @@
-"""One map job at a time, using immutable screenshots and worker-owned evidence."""
+"""One map job at a time, using immutable screenshots and worker-owned caches."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Lock
@@ -14,7 +14,6 @@ class MapJobs:
         self._context = None
         self._param = None
         self._detector = None
-        self._epoch = None
         self._progress = None
         self._progress_lock = Lock()
 
@@ -22,7 +21,7 @@ class MapJobs:
     def busy(self):
         return self._future is not None
 
-    def submit(self, param, context, epoch):
+    def submit(self, param, context):
         if self.busy:
             return False
         # No capture API or QObject crosses into the matching worker.
@@ -30,7 +29,7 @@ class MapJobs:
             self._progress = None
         param = replace(param, img=param.img.copy(), on_progress=self._publish_progress)
         self._context, self._param = context, param
-        self._future = self._executor.submit(self._run, param, epoch)
+        self._future = self._executor.submit(self._run, param)
         return True
 
     def _publish_progress(self, result):
@@ -38,12 +37,9 @@ class MapJobs:
             # Only retain the newest snapshot, regardless of consumer speed.
             self._progress = result
 
-    def _run(self, param, epoch):
+    def _run(self, param):
         if self._detector is None:
             self._detector = self._factory()
-        if epoch != self._epoch:
-            self._detector.partial_inference = None
-            self._epoch = epoch
         if param.do_match_pattern and param.earth_shifting is None:
             terrain = self._detector.detect(None, replace(param, do_match_pattern=False,
                                                           do_match_earth_shifting=True))
@@ -51,8 +47,7 @@ class MapJobs:
                 return terrain
             param = replace(param, earth_shifting=terrain.earth_shifting)
         result = self._detector.detect(None, param)
-        if not param.infer_partial:
-            result.earth_shifting = param.earth_shifting
+        result.earth_shifting = param.earth_shifting
         return result
 
     def poll(self, context):

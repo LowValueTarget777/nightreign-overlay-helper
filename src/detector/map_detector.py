@@ -11,7 +11,6 @@ import random
 from hashlib import blake2b
 
 from src.config import Config
-from src.detector.partial_map import PartialMapInference
 from src.logger import info, warning, error, debug, diagnostics_enabled
 from src.performance import ByteCache
 from src.common import get_appdata_path, get_data_path
@@ -242,13 +241,11 @@ class MapDetectParam:
     do_match_pattern: bool = False
     return_pattern_topk: int | None = None
     hdr_processing_enabled: bool = False
-    infer_partial: bool = False
     on_progress: Callable | None = None
 
 @dataclass
 class MapDetectResult:
     rendering_complete: bool = True
-    inference_message: str | None = None
     img: np.ndarray | None = None
     is_full_map: bool = None
     earth_shifting: int | None = None
@@ -259,7 +256,6 @@ class MapDetectResult:
 
 class MapDetector:  
     def __init__(self):
-        self.partial_inference = None
         self._resources = ByteCache(16 * 1024 * 1024)
         self._poi_templates = ByteCache(24 * 1024 * 1024)
         self._overlay_layers = ByteCache(32 * 1024 * 1024)
@@ -661,7 +657,7 @@ class MapDetector:
     def _draw_overlay_image(self, match_result: MapPatternMatchResult, draw_size: tuple[int, int], result_index: int) -> Image.Image:
         pattern = match_result.pattern
         draw_size = tuple(draw_size)
-        # Cached layers are immutable. Always return a copy for inference captions.
+        # Cached layers are immutable. Return a copy for the changing result header.
         img = self._overlay_layers.get((pattern.id, draw_size),
             lambda: self._draw_overlay_base(pattern, draw_size)).copy()
         text = f"#{pattern.id}"
@@ -931,28 +927,9 @@ class MapDetector:
             ret.earth_shifting_score = earth_shifting_score
 
         # 地图模式匹配
-        if param.do_match_pattern or param.infer_partial:
-            if param.infer_partial:
-                if self.partial_inference is None:
-                    self.partial_inference = PartialMapInference(self.info, self.poi_cate_info)
-                count = self.partial_inference.scan(cv2.resize(img, STD_MAP_SIZE, interpolation=CV2_RESIZE_METHOD))
-                ranked = self.partial_inference.evidence.rank(
-                    self.info.patterns, get_poi_key, self.partial_inference.icon_aliases)
-                results = []
-                ret.inference_message = f"地图推测：已确认 {count} 个地标，等待探索"
-                if count >= 2 and ranked:
-                    best = ranked[0]
-                    if best[1] >= 2 and best[2] <= count * 0.25:
-                        tied = sum(row[2] == best[2] for row in ranked)
-                        ret.inference_message = f"地图推测：{count} 地标，{tied} 个并列候选"
-                        eligible = [row for row in ranked if row[1] >= 2 and row[2] <= count * 0.25]
-                        results = [MapPatternMatchResult(p, None, score, error)
-                                   for p, score, error in eligible[:param.return_pattern_topk or 5]]
-                    else:
-                        ret.inference_message = f"地图推测：{count} 地标存在冲突，请继续探索或清空"
-            else:
-                ret.earth_shifting = param.earth_shifting
-                results = self._match_map_pattern(img, param.earth_shifting, topk=param.return_pattern_topk)
+        if param.do_match_pattern:
+            ret.earth_shifting = param.earth_shifting
+            results = self._match_map_pattern(img, param.earth_shifting, topk=param.return_pattern_topk)
 
             # 决定信息绘制大小
             if config.fixed_map_overlay_draw_size is not None:
@@ -971,12 +948,6 @@ class MapDetector:
                 try:
                     info(f"MapDetector: Start to draw overlay image for pattern {result.pattern.id}")
                     overlay_img = self._draw_overlay_image(result, draw_size, i)
-                    if param.infer_partial:
-                        caption_scale = draw_size[0] / 750
-                        draw_text(overlay_img, (draw_size[0]//2, int(25 * caption_scale)),
-                                  f"推测 #{i+1} · {result.score}/{count} 地标相符（非确定结果）",
-                                  size=max(12, int(18 * caption_scale)), color=(255, 200, 80, 255),
-                                  outline_width=max(1, int(2 * caption_scale)))
                     ret.overlay_images.append(overlay_img)
                     ret.patterns.append(result.pattern)
                     if param.on_progress is not None and i < len(results) - 1:

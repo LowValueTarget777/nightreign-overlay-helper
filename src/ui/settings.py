@@ -443,17 +443,6 @@ class SettingsWindow(QWidget):
         map_detect_enable_layout.addStretch()
         self.map_detect_layout.addLayout(map_detect_enable_layout)
 
-        self.partial_map_checkbox = QCheckBox("地图信息丢失模式（实验性）")
-        self.partial_map_checkbox.setToolTip(
-            "仅在地图信息丢失事件中开启。打开未缩放的完整地图，按已探索地标累计推测。\n"
-            "未知位置不扣分，候选不是确定结果；新一局未识别到 Day 1 时请手动清空。"
-        )
-        self.partial_map_checkbox.toggled.connect(self.update_partial_map)
-        self.map_detect_layout.addWidget(self.partial_map_checkbox)
-        reset_partial_button = QPushButton("清空本局地图推断")
-        reset_partial_button.clicked.connect(self.updater.reset_partial_map)
-        self.map_detect_layout.addWidget(reset_partial_button)
-
         capture_map_region_input_setting_layout = QHBoxLayout()
         capture_map_region_input_setting_layout.addWidget(QLabel("截取地图区域快捷键"))
         self.capture_map_region_input_widget = InputSettingWidget(self.input)
@@ -764,20 +753,21 @@ class SettingsWindow(QWidget):
         self.art_timer_layout.addWidget(self.art_region_label)
 
     def init_layouts(self):
-        # Layouts  
+        # Keep timer controls together and balance the three columns with the
+        # optional playtime controls expanded, avoiding a tall middle column.
         layouts = [QVBoxLayout() for _ in range(3)]
 
         layouts[0].addWidget(self.appearance_group)
         layouts[0].addWidget(self.input_group)
-        layouts[0].addWidget(self.other_group)
+        layouts[0].addWidget(self.auto_timer_group)
 
         layouts[1].addWidget(self.performance_group)
-        layouts[1].addWidget(self.auto_timer_group)
-        layouts[1].addWidget(self.p2p_group)
+        layouts[1].addWidget(self.map_detect_group)
+        layouts[1].addWidget(self.art_timer_group)
 
-        layouts[2].addWidget(self.map_detect_group)
+        layouts[2].addWidget(self.p2p_group)
         layouts[2].addWidget(self.hp_detect_group)
-        layouts[2].addWidget(self.art_timer_group)
+        layouts[2].addWidget(self.other_group)
 
         self.layout: QHBoxLayout = QHBoxLayout(self)
         for l in layouts:
@@ -901,11 +891,6 @@ class SettingsWindow(QWidget):
             self.auto_regions_checkbox.setChecked(data.get("auto_regions_enabled", True))
             self.auto_regions_checkbox.blockSignals(False)
             self.update_auto_regions()
-            self.partial_map_checkbox.blockSignals(True)
-            self.partial_map_checkbox.setChecked(data.get("partial_map_enabled", False))
-            self.partial_map_checkbox.blockSignals(False)
-            self.update_partial_map()
-
             info("Settings loaded successfully")
         except Exception as e:
             error(f"Failed to load settings: {e}")
@@ -930,7 +915,6 @@ class SettingsWindow(QWidget):
                 "detect_interval": self.detect_interval_combobox.currentText(),
                 "screencap_mode": self.screencap_mode_combobox.currentText(),
                 "auto_regions_enabled": self.auto_regions_checkbox.isChecked(),
-                "partial_map_enabled": self.partial_map_checkbox.isChecked(),
                 # 队友延迟
                 "p2p_enabled": self.p2p_enabled_checkbox.isChecked(),
                 "p2p_size": self.p2p_size_slider.value(),
@@ -1503,9 +1487,6 @@ class SettingsWindow(QWidget):
                 self.update_map_region()
             self.save_settings()
 
-    def update_partial_map(self, checked=None):
-        self.updater.partial_map_enabled = self.partial_map_checkbox.isChecked()
-        self.updater.reset_partial_map()
 
     def update_auto_regions(self, checked=None):
         enabled = self.auto_regions_checkbox.isChecked()
