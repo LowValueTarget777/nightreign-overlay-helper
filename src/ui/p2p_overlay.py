@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtCore import QPoint, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QDesktopServices, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -11,9 +11,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QVBoxLayout,
     QWidget,
+    QToolTip,
 )
 
-from src.logger import info
+from src.logger import info, warning
 from src.p2p.models import P2PPeer, P2PStatus
 from src.p2p.playtime import PlaytimeResult, format_playtime
 from src.ui.utils import set_widget_always_on_top
@@ -46,6 +47,60 @@ class P2POverlayUIState:
     show_playtime: bool | None = None
 
 
+class SteamProfileLabel(QLabel):
+    """Keep clicks separate from settings-time dragging and context menus."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, steam_id: str, overlay: P2POverlayWidget):
+        super().__init__()
+        self.steam_id = steam_id
+        self.overlay = overlay
+        self._press_position: QPoint | None = None
+        self._dragged = False
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(overlay._open_steam_profile, Qt.ConnectionType.QueuedConnection)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_position = event.globalPosition().toPoint()
+            self._drag_offset = self._press_position - self.overlay.pos()
+            self._dragged = False
+            event.accept()
+        else:
+            self._press_position = None
+            event.ignore()  # Preserve the overlay's right-click menu.
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._press_position is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            position = event.globalPosition().toPoint()
+            if (position - self._press_position).manhattanLength() >= QApplication.startDragDistance():
+                self._dragged = True
+            if self._dragged and self.overlay.draggable:
+                self.overlay.move(position - self._drag_offset)
+            event.accept()
+        else:
+            event.ignore()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            start = self._press_position
+            self._press_position = None
+            if (start is not None and not self._dragged
+                    and (event.globalPosition().toPoint() - start).manhattanLength()
+                    < QApplication.startDragDistance()
+                    and self.rect().contains(event.position().toPoint())):
+                self.clicked.emit(self.steam_id)
+            event.accept()
+        else:
+            event.ignore()
+
+    def hideEvent(self, event):
+        self._press_position = None
+        super().hideEvent(event)
+
+
 class P2POverlayWidget(QWidget):
     right_click_signal = pyqtSignal()
 
@@ -74,6 +129,7 @@ class P2POverlayWidget(QWidget):
         self.status = P2PStatus("waiting_for_game", "等待 nightreign.exe")
         self.peers: list[P2PPeer] = []
         self.playtimes: dict[str, PlaytimeResult] = {}
+        self._name_labels: dict[str, SteamProfileLabel] = {}
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -218,14 +274,33 @@ class P2POverlayWidget(QWidget):
             f"border-radius: {int(8 * self.scale)}px; {border} }}"
         )
 
+    @pyqtSlot(str)
+    def _open_steam_profile(self, steam_id: str):
+        # Construct only a profile URI, never a command or a URL from a name.
+        if (not steam_id.isascii() or not steam_id.isdecimal()
+                or len(steam_id) != 17 or not 0 < int(steam_id) < 2**64):
+            warning("Cannot open Steam profile: invalid SteamID")
+            return
+        if not any(peer.steam_id == steam_id for peer in self.peers):
+            return
+        # Runs after mouse release, so Steam cannot inherit Qt's mouse grab.
+        if not QDesktopServices.openUrl(QUrl(f"steam://url/SteamIDPage/{steam_id}")):
+            warning("Steam profile URI could not be opened")
+            QToolTip.showText(
+                self.mapToGlobal(self.rect().center()),
+                "无法打开 Steam 资料页，请确认 Steam 客户端已安装并登录。", self,
+            )
+
     def _clear_grid(self):
         while self.peer_grid.count():
             item = self.peer_grid.takeAt(0)
-            if item.widget() is not None:
+            if item.widget() is not None and not isinstance(item.widget(), SteamProfileLabel):
                 item.widget().deleteLater()
 
     def _refresh_rows(self):
         self._clear_grid()
+        old_names = self._name_labels
+        self._name_labels = {}
         self.status_label.setVisible(not self.peers)
         legacy_ping_unavailable = any(
             peer.api == "legacy" and peer.ping_ms is None for peer in self.peers
@@ -233,14 +308,23 @@ class P2POverlayWidget(QWidget):
         self.legacy_ping_label.setVisible(legacy_ping_unavailable)
         font_size = int(13 * self.scale)
         for row, peer in enumerate(self.peers):
-            name_label = QLabel(peer.name)
-            tooltip = f"SteamID: {peer.steam_id}\nAPI: {peer.api}"
+            # Reuse by identity: a periodic ping/playtime update must not destroy
+            # the widget between mouse press and release, or change its target.
+            name_label = old_names.pop(peer.steam_id, None)
+            if name_label is None:
+                name_label = SteamProfileLabel(peer.steam_id, self)
+            self._name_labels[peer.steam_id] = name_label
+            name_label.setText(peer.name)
+            tooltip = f"左键点击：在 Steam 中打开资料页\nSteamID: {peer.steam_id}\nAPI: {peer.api}"
             if peer.api == "legacy" and peer.ping_ms is None:
                 tooltip += "\n旧 Steam P2P 接口没有 Ping/稳定度字段"
             elif peer.api == "legacy":
                 tooltip += "\n延迟来源：ETW STUN 往返时间"
             name_label.setToolTip(tooltip)
-            name_label.setStyleSheet(f"color: white; font-size: {font_size}px;")
+            name_label.setStyleSheet(
+                f"QLabel {{ color: white; font-size: {font_size}px; }}"
+                "QLabel:hover { color: #66c0f4; text-decoration: underline; }"
+            )
 
             ping_text = "-- ms" if peer.ping_ms is None else f"{peer.ping_ms} ms"
             ping_color = get_ping_color(peer.ping_ms, self.good_ping, self.warning_ping)
@@ -269,6 +353,9 @@ class P2POverlayWidget(QWidget):
                 )
                 self.peer_grid.addWidget(playtime_label, row, 3)
 
+        for label in old_names.values():
+            label.hide()
+            label.deleteLater()
         self.peer_grid.setColumnStretch(0, 1)
         self.adjustSize()
 
