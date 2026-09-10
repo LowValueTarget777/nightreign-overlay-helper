@@ -1,5 +1,7 @@
 # Nightreign Overlay Helper
 
+本 Fork 的 Python 维护主线为 `main`。当前功能、验收状态和本地运行包见 [项目进度](docs/PROJECT_STATUS.md)，历史分支及回退入口见 [分支索引](docs/BRANCHES.md)。C# 重构单独保存在实验分支。
+
 [中文README](#黑夜君临悬浮助手)
 
 Nightreign Overlay Helper is a utility program developed with PyQt6, designed to display various useful information and features while playing the game, **currently supporting only the Chinese language**.
@@ -11,6 +13,7 @@ Nightreign Overlay Helper is a utility program developed with PyQt6, designed to
 - Displays health percentage markers corresponding to "trigger when health is low" and "trigger when health is full" entries.
 - Displays countdowns for art buffs of certain characters.
 - Displays Nightreign teammate Steam names, ping, and connection stability in a separate overlay.
+- Optionally displays teammates' public Nightreign playtime; left-click a teammate's name to open their profile in the Steam client.
 
 ## Build Instructions
 
@@ -60,8 +63,10 @@ The program recognizes game information through screenshots and reads local Stea
 - 显示“血量较低触发”与“满血时触发”的词条对应百分比血量位置标记。
 - 显示部分角色的绝招buff倒计时。
 - 默认按游戏客户区自动适配 16:9 的五组识别区域（以 2560×1440 默认 HUD 为基准）；特殊 HUD 或其他宽高比可在设置中关闭自动适配，恢复手动框选。原手动坐标会保留。
-- 地图信息丢失事件可手动开启实验性推断模式：打开未缩放的完整地图，按逐渐发现的地标更新候选；未知位置不视为空地，候选标明“推测”。至少两个位置的地标通过重复观察后才显示候选；识别到新一局 Day 1 或游戏窗口重建时清空，也可手动清空。图标检测仍需事件实测校准。
 - 通过独立悬浮窗显示《黑夜君临》队友的 Steam 昵称、Ping 与连接稳定度。
+- 可选显示队友公开的《黑夜君临》游戏时长，优先免 Key 查询；隐藏或无法访问的资料不保证可查询。
+- 左键点击队友名字，在 Steam 客户端内打开该队友资料页；拖动不会误触，右键仍打开助手菜单。
+- 保留地图处理缓存和后台任务等性能优化；实验性地图信息丢失推断模式已移除。
 
 性能优化分支使用区域裁剪、受限缓存和独立地图任务，候选图逐步显示。基准数据、验证范围及复现方法见[性能优化记录](docs/performance.md)。
 
