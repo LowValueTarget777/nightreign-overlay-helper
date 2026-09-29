@@ -7,7 +7,7 @@
 | 分支 | 用途 | 整理时位置 |
 | --- | --- | --- |
 | `main` | Python 维护主线 | `bcb79c4` 功能提交，随后追加本次整理文档 |
-| `LVT/match-name-block` | 当前：从 bcb79c4 恢复统一框，开局暂时屏蔽新出现的非好友，离队恢复 | `0.10.10.dev2`；连续三局文件 IPC 回归通过，真实对局复验待完成 |
+| `LVT/match-name-block` | 当前：从 bcb79c4 恢复统一框，开局暂时屏蔽新出现的非好友，离队恢复 | `0.10.10.dev3`；增加精确找窗和诊断，保留连续三局修复；实机待复验 |
 | `LVT/teammate-hud` | 已停止推进的头像左侧 HUD 实验，保留历史 | `0.10.9.dev8` / `b8550a8`；未合入 main |
 | `LVT/stable-python` | 重构前稳定基线 | `41d91b1` |
 | `LVT/experimental/csharp-rewrite` | C# 重构实验 | `eb44e42` |

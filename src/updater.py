@@ -567,6 +567,7 @@ class Updater(QObject):
             if regions != self._auto_regions or message != self._auto_regions_message:
                 self._auto_regions = regions
                 self._auto_regions_message = message
+                info(f"Detection regions: {message}")
                 self.auto_regions_status.emit(message, regions)
                 self.current_is_full_map = False
                 self.set_to_detect_map_pattern_once()

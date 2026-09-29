@@ -1,10 +1,10 @@
 # 开局显示匹配队友 Steam 名字
 
-当前试用版本 `0.10.10.dev2`，分支 `LVT/match-name-block`，从用户指定的 `bcb79c4` 建立。统一联机悬浮框及点击资料页的代码保持该基线，未带入头像左侧 HUD、名字图像比对或 OCR。dev2 修复恢复完成后旧事务反复进入恢复、阻塞第二局的问题。
+当前试用版本 `0.10.10.dev3`，分支 `LVT/match-name-block`，从用户指定的 `bcb79c4` 建立。统一联机悬浮框及点击资料页的代码保持该基线，未带入头像左侧 HUD、名字图像比对或 OCR。保留 dev2 连续对局修复；dev3 精确选择游戏窗口，排除同名文件夹或网页，并记录截图目标与自动区域状态。用户此前识别失效的唯一根因尚未由旧日志确认。
 
 ## 使用
 
-退出旧助手，运行 `dist/nightreign-match-names-rounds/nightreign-overlay-helper.exe`。在设置的“队友信息”中勾选“开局自动显示匹配队友的 Steam 名字（暂时屏蔽通信）”。首次默认关闭，保存设置后记忆；关闭队友延迟功能也会停用此功能并请求恢复。状态可在设置和托盘提示中查看。
+退出旧助手，运行 `dist/nightreign-match-names-capture/nightreign-overlay-helper.exe`。在设置的“队友信息”中勾选“开局自动显示匹配队友的 Steam 名字（暂时屏蔽通信）”。首次默认关闭，保存设置后记忆；关闭队友延迟功能也会停用此功能并请求恢复。状态可在设置和托盘提示中查看。
 
 开启后必须观察到实际前台 DAY1；手动计时、对局中途启用或重启不会替代 DAY1。即使自动缩圈计时关闭，开启本功能仍会检测 DAY1。游戏内名字切换利用用户实测的屏蔽通信行为，新版完整流程仍待游戏验收。
 
@@ -33,10 +33,10 @@
 离线入口（已纳入 Git，不操作 Steam）：
 
 ```powershell
-python -m unittest scripts.test_p2p_profile_click scripts.test_settings_cleanup scripts.test_performance scripts.test_match_block scripts.test_identity_bridge
+python -m unittest scripts.test_p2p_profile_click scripts.test_settings_cleanup scripts.test_performance scripts.test_match_block scripts.test_identity_bridge scripts.test_capture_target
 dotnet run --project scripts/identity_native_tests/IdentityRecoveryTests.csproj -c Release
 ```
 
 覆盖 DAY1 信号接线、关闭自动计时仍识别、好友/未知关系排除、两名目标、留房继续下一局、离队、过期快照、开关和退出、独立事务与续约、断网重试、进程重启恢复、网页及关系双重验证和磁盘失败。合成通道及故障注入不代表真实断网/闪退验收。
 
-dev2 的 71 项 Python 回归通过，含真实文件 Bridge 的连续三局回放与终态重复解除；原生未改，沿用 dev1 的 27 项测试结果及构建。dev1 用户反馈第一局屏蔽成功、第二局失败；dev2 完成打包和内嵌源码核对，尚无真实连续对局复验。本次修复未操作用户 Steam 账号；包内 `build-info.json` 记录实际构建和离线结果。没有推送或发布正式版本。
+dev3 的 78 项 Python 回归通过，含精确找窗、前台校验、检测入口恢复、真实文件 Bridge 连续三局回放与终态重复解除；原生未改，沿用 dev1 的 27 项测试结果及构建。dev1 用户反馈第一局屏蔽成功、第二局失败；dev2 用户报告共同识别异常，重启后检测重新产出，旧日志无法唯一确认原因。dev3 已完成离线验证，真实连续对局仍待复验。本次修复未操作用户 Steam 账号；包内 `build-info.json` 记录实际构建和离线结果。没有推送或发布正式版本。

@@ -7,7 +7,7 @@ from PIL import Image
 from src.common import GAME_WINDOW_TITLE
 from src.logger import info, warning
 from src.screencap.errors import ScreencapInitError, ScreencapRuntimeError
-from src.screencap.hwnd_resolver import find_game_hwnd, get_client_size, get_capture_geometry
+from src.screencap.hwnd_resolver import find_game_hwnd, get_client_size, get_capture_geometry, is_game_window
 from src.screencap.native_loader import get_native_dll_dir, get_native_dll_path
 from src.screencap.types import EngineStatus, ScreencapMode
 
@@ -166,7 +166,8 @@ class ScreencapEngine:
             self._last_frame = first_frame
             self._annotate_geometry(first_frame)
             self._last_frame_time = time.time()
-            info(f"ScreencapEngine initialized, selected method: {self._selected_method_name}")
+            info(f"ScreencapEngine initialized, selected method: {self._selected_method_name} "
+                 f"hwnd={hwnd} client_rect={first_frame.info['client_rect']} frame_size={first_frame.size}")
             self._status = EngineStatus.CONNECTED
             self._reset_pending_window()
 
@@ -186,6 +187,8 @@ class ScreencapEngine:
             raise ScreencapInitError("connect_failed", str(e)) from e
 
     def _annotate_geometry(self, frame):
+        if not is_game_window(self._capture_hwnd, GAME_WINDOW_TITLE):
+            raise ScreencapRuntimeError("window_changed", "Capture target is no longer the exact game window.")
         client, bounds = get_capture_geometry(self._capture_hwnd, self._background_capture)
         if frame.size != bounds[2:]:
             raise ScreencapRuntimeError("geometry_changed", "Capture size does not match window/monitor geometry.")
