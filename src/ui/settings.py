@@ -582,6 +582,20 @@ class SettingsWindow(QWidget):
         self.p2p_enabled_checkbox.stateChanged.connect(self.update_p2p_enabled)
         layout.addWidget(self.p2p_enabled_checkbox)
 
+        self.match_block_checkbox = QCheckBox("开局自动显示匹配队友的 Steam 名字（暂时屏蔽通信）")
+        self.match_block_checkbox.setChecked(False)
+        self.match_block_checkbox.stateChanged.connect(self.update_match_block_enabled)
+        layout.addWidget(self.match_block_checkbox)
+        hint = QLabel("好友一律跳过；仅处理 DAY1 附近新出现的非好友。离队、关闭开关或退出助手后解除。断网时保留恢复记录，原账号联网后重试。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+        layout.addWidget(hint)
+        self.match_block_status = QLabel("自动显示 Steam 名字已关闭")
+        self.match_block_status.setWordWrap(True)
+        layout.addWidget(self.match_block_status)
+        if self.match_block is not None:
+            self.match_block.status_changed.connect(self.match_block_status.setText)
+
         size_layout = QHBoxLayout()
         size_layout.addWidget(QLabel("悬浮窗大小"))
         self.p2p_size_slider = QSlider(Qt.Orientation.Horizontal)
@@ -833,6 +847,8 @@ class SettingsWindow(QWidget):
             self.playtime_enabled_checkbox.setChecked(data.get("p2p_playtime_enabled", False))
             self.playtime_enabled_checkbox.blockSignals(False)
             self.update_p2p_enabled()
+            self.match_block_checkbox.setChecked(data.get("match_block_enabled", False))
+            self.update_match_block_enabled()
             self.update_p2p_thresholds()
             self.update_playtime_enabled()
             p2p_x = data.get("p2p_x")
@@ -917,6 +933,7 @@ class SettingsWindow(QWidget):
                 "auto_regions_enabled": self.auto_regions_checkbox.isChecked(),
                 # 队友延迟
                 "p2p_enabled": self.p2p_enabled_checkbox.isChecked(),
+                "match_block_enabled": self.match_block_checkbox.isChecked(),
                 "p2p_size": self.p2p_size_slider.value(),
                 "p2p_opacity": self.p2p_opacity_slider.value(),
                 "p2p_x": self.p2p_overlay.x(),
@@ -1011,6 +1028,7 @@ class SettingsWindow(QWidget):
         p2p_overlay: P2POverlayWidget,
         p2p_service: P2PService,
         playtime_service: SteamPlaytimeService,
+        match_block=None,
     ):
         super().__init__()
         config = Config.get()
@@ -1021,6 +1039,7 @@ class SettingsWindow(QWidget):
         self.p2p_overlay = p2p_overlay
         self.p2p_service = p2p_service
         self.playtime_service = playtime_service
+        self.match_block = match_block
         self.update_p2p_overlay_ui_state_signal.connect(p2p_overlay.update_ui_state)
         self.p2p_service.status_changed.connect(self.update_p2p_status_display)
         self.playtime_service.status_changed.connect(self.update_playtime_status_display)
@@ -1572,8 +1591,15 @@ class SettingsWindow(QWidget):
     def update_p2p_enabled(self, state=None):
         enabled = self.p2p_enabled_checkbox.isChecked()
         self.p2p_service.set_enabled(enabled)
+        self.update_match_block_enabled()
         self.update_p2p_overlay_ui_state_signal.emit(P2POverlayUIState(enabled=enabled))
         info(f"P2P info enabled: {enabled}")
+
+    def update_match_block_enabled(self, state=None):
+        enabled = self.p2p_enabled_checkbox.isChecked() and self.match_block_checkbox.isChecked()
+        self.updater.match_block_enabled = enabled
+        if self.match_block is not None:
+            self.match_block.set_enabled(enabled)
 
     def update_p2p_size(self, value):
         self.update_p2p_overlay_ui_state_signal.emit(P2POverlayUIState(scale=value / 100.0))

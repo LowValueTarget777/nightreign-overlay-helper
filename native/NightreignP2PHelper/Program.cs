@@ -13,6 +13,11 @@ internal static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        // Recovery must outlive the overlay and must not wait for a game process.
+        if (args.Length == 2 && args[0] == "--match-worker" && int.TryParse(args[1], out var slot))
+            return IdentityWorker.Run(slot);
+        if (args.Contains("--identity-worker"))
+            return IdentityWorker.Run();
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.InputEncoding = System.Text.Encoding.UTF8;
 

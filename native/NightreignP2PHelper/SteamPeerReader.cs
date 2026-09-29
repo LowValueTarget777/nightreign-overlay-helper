@@ -78,7 +78,9 @@ internal sealed class SteamPeerReader(EtwPingMonitor? etw = null)
 
         _lastPublishedPeers.Clear();
         _lastPublishedPeers.UnionWith(peers.Select(peer => ulong.Parse(peer.SteamId)));
-        return peers;
+        return peers.Select(peer => peer with {
+            Relationship = (int)SteamFriends.GetFriendRelationship(new CSteamID(ulong.Parse(peer.SteamId)))
+        }).ToList();
     }
 
     private static HashSet<ulong> GetSteamFriendsCandidates()

@@ -15,6 +15,7 @@ from src.ui.p2p_overlay import P2POverlayUIState, P2POverlayWidget
 from src.ui.settings import SettingsWindow
 from src.ui.admin_prompt import show_admin_prompt
 from src.p2p import P2PService, SteamPlaytimeService
+from src.p2p.match_block import MatchBlockController
 from src.updater import Updater
 from src.common import APP_FULLNAME, APP_VERSION, ICON_PATH
 from src.logger import info, warning, error
@@ -80,15 +81,20 @@ if __name__ == "__main__":
     playtime_service.results_changed.connect(p2p_overlay.set_playtimes)
 
     updater = Updater(input, overlay, map_overlay, hp_overlay)
+    match_block = MatchBlockController()
+    p2p_service.snapshot_received.connect(match_block.set_peers)
+    p2p_service.status_changed.connect(match_block.set_status)
+    updater.expedition_started.connect(match_block.on_day_one)
     updater.game_foreground_changed.connect(p2p_overlay.set_game_foreground)
     settings_window = SettingsWindow(
-        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service
+        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service, match_block
     )
     
     # 创建系统托盘图标和菜单
     tray_icon = QSystemTrayIcon()
     tray_icon.setIcon(QIcon(ICON_PATH))
     tray_icon.setToolTip(APP_FULLNAME)
+    match_block.status_changed.connect(lambda text: tray_icon.setToolTip((APP_FULLNAME + "\n" + text)[:127]))
 
     menu = QMenu()
     settings_action = QAction("设置")
@@ -144,11 +150,13 @@ if __name__ == "__main__":
 
     # 设置加载完成后启动，确保联机信息启用状态已经生效。
     p2p_service.start()
+    match_block.start()
 
     # 清理：程序退出时，停止worker并等待线程结束
     def on_quit():
         info("Stopping worker thread...")
         playtime_service.stop()
+        match_block.stop()
         p2p_service.stop()
         updater.stop()
         input.stop()

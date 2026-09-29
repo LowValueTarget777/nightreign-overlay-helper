@@ -9,7 +9,8 @@ internal sealed record PeerSnapshot(
     [property: JsonPropertyName("ping_ms")] int? PingMs,
     [property: JsonPropertyName("quality")] double? Quality,
     [property: JsonPropertyName("api")] string Api,
-    [property: JsonPropertyName("state")] string State);
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("relationship")] int? Relationship = null);
 
 internal static class Protocol
 {

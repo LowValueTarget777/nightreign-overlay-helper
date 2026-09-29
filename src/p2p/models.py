@@ -13,6 +13,7 @@ class P2PPeer:
     quality: float | None
     api: str
     state: str
+    relationship: int | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,9 @@ def parse_helper_message(line: str) -> tuple[str, Any]:
 
             ping = raw_peer.get("ping_ms")
             quality = raw_peer.get("quality")
+            relationship = raw_peer.get("relationship")
+            if relationship is not None and (type(relationship) is not int or relationship not in range(9)):
+                raise ValueError("invalid peer relationship")
             if ping is not None and not isinstance(ping, int):
                 raise ValueError("invalid peer ping")
             if quality is not None and not isinstance(quality, (int, float)):
@@ -93,6 +97,7 @@ def parse_helper_message(line: str) -> tuple[str, Any]:
                 quality=float(quality) if quality is not None else None,
                 api=api,
                 state=state,
+                relationship=relationship,
             ))
         return "snapshot", peers
 
