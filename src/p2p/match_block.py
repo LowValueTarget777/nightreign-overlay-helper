@@ -29,6 +29,7 @@ class MatchBlockController(QObject):
         self.attempted = set()
         self.assigned = {}
         self.message = "自动显示 Steam 名字已关闭"
+        self._last_diagnostic = None
         self.timer = QTimer(self)
         self.timer.setInterval(250)
         self.timer.timeout.connect(self.tick)
@@ -93,6 +94,14 @@ class MatchBlockController(QObject):
         fresh = 0 <= now - self.last_snapshot <= 5
         for index, target in list(self.assigned.items()):
             bridge = self.bridges[index]
+            # Release completed slots before considering departure. Otherwise a
+            # departed target's retained transaction ID can re-enter restoration
+            # forever and gate every later expedition.
+            if bridge.status.get("state") in {"idle", "restored", "error"} and not bridge.pending:
+                bridge.authorize_hold("")
+                del self.assigned[index]
+                info(f"Match name: slot released slot={index} state={bridge.status.get('state')}")
+                continue
             peer = self.peers.get(target)
             # Steam may report Ignored/Blocked after our block; that isn't a
             # reason to treat a still-connected teammate as a newly found friend.
@@ -100,15 +109,17 @@ class MatchBlockController(QObject):
             if not keep and bridge.status.get("state") not in {"restoring", "recovery_pending"}:
                 bridge.restore()
             bridge.authorize_hold(target if keep and bridge.status.get("state") in {"preparing", "blocked"} else "")
-            if bridge.status.get("state") in {"idle", "restored", "error"} and not bridge.pending:
-                bridge.authorize_hold("")
-                del self.assigned[index]
 
         # Do not start anything while older recovery is unresolved. Other slots
         # can stay blocked normally; their independent owners cannot starve one
         # another's recovery during a network outage.
         recovering = self.legacy.status.get("state") not in {"idle", "restored"} or any(
             b.status.get("state") in {"restoring", "recovery_pending"} for b in self.bridges)
+        reason = ('disabled' if not self.enabled else 'stale_peers' if not fresh else
+                  'recovery_pending' if recovering else 'no_day1' if self.day_one is None else
+                  'start_delay' if now - self.day_one < 5 else
+                  'opening_expired' if now - self.day_one > 45 else 'opening_ready')
+        candidates = []
         if self.enabled and fresh and not recovering and self.day_one is not None and 5 <= now - self.day_one <= 45:
             candidates = [p for p in self.peers.values() if p.relationship == 0
                           and p.state == "connected" and p.steam_id not in self.attempted
@@ -126,6 +137,13 @@ class MatchBlockController(QObject):
                     info("Match name: nonfriend hold requested")
                 else:
                     bridge.authorize_hold("")
+
+        diagnostic = (reason, len(self.peers), sum(p.relationship == 0 for p in self.peers.values()),
+                      len(candidates), len(self.assigned))
+        if diagnostic != self._last_diagnostic:
+            self._last_diagnostic = diagnostic
+            info(f"Match name: gate={reason} peers={diagnostic[1]} nonfriends={diagnostic[2]} "
+                 f"eligible={diagnostic[3]} assigned={diagnostic[4]}")
 
         busy = [b.status.get("message", "") for b in [self.legacy, *self.bridges]
                 if b.status.get("state") in {"preparing", "blocked", "restoring", "recovery_pending", "error"}]

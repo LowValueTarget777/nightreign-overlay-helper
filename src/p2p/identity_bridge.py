@@ -125,6 +125,10 @@ class IdentityBridge(QObject):
 
     def restore(self):
         self.hold_target = ""
+        # Terminal telemetry retains the last transaction ID. It is history,
+        # not a pending action; never turn verified completion back into recovery.
+        if self._pending is None and self.status.get("state") in {"idle", "restored", "error"}:
+            return
         transaction = self._pending or self.status.get("transaction", "")
         if not transaction or len(transaction) != 32:
             return
@@ -191,7 +195,7 @@ class IdentityBridge(QObject):
             if diagnostic != self._last_status_log:
                 self._last_status_log = diagnostic
                 state, compatible, accepts, pending = diagnostic
-                info(f"Identity worker state={state} compatible={compatible} accepts_begin={accepts} pending={pending}")
+                info(f"Identity worker state={state} compatible={compatible} accepts_begin={accepts} pending={pending} slot={self._slot if self._slot is not None else 'legacy'}")
 
     def _warn_worker(self, reason, helper, exitcode=None):
         # A failed child may be retried every five seconds. Keep the first

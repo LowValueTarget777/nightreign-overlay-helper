@@ -69,6 +69,57 @@ class MatchPolicyTests(unittest.TestCase):
         for _ in range(20): self.feed([peer()], 10)
         self.assertFalse(any(b.begins for b in self.bridges))
 
+    def test_three_expeditions_release_completed_slots_with_real_file_bridge(self):
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from src.p2p import identity_bridge as ipc
+        with TemporaryDirectory(prefix='nr-match-rounds-') as directory, \
+                patch.object(ipc, 'identity_directory', return_value=Path(directory)), \
+                patch.object(ipc, '_launch_worker') as launch:
+            bridges = [ipc.IdentityBridge(slot=i) for i in (0, 1)]
+            controller = MatchBlockController(bridges=bridges, legacy=Bridge(), clock=lambda: self.now)
+            def status(bridge, state, transaction='', target=''):
+                ipc._write_json(bridge._root/'status.json', dict(state=state, transaction=transaction, target=target,
+                    message='test', accepts_begin=state in {'idle', 'restored', 'error'},
+                    steam_lifecycle='match_hold_v1', updated_at=datetime.now(timezone.utc).isoformat()))
+                bridge._poll()
+            try:
+                for bridge in bridges:
+                    status(bridge, 'idle')
+                    bridge.start()
+                    bridge._timer.stop()
+                controller.set_enabled(True)
+                # Changed opponents, then rematch with the same opponents.
+                for players in ([peer(1), peer(2)], [peer(3), peer(4)], [peer(3), peer(4)]):
+                    self.now += 600
+                    controller.set_peers(players)
+                    controller.on_day_one(self.now)
+                    self.now += 6
+                    controller.set_peers(players)
+                    self.assertEqual(len(controller.assigned), 2)
+                    transactions = [b._pending for b in bridges]
+                    self.assertTrue(all(transactions), 'next expedition failed to submit new requests')
+                    for bridge, transaction, player in zip(bridges, transactions, players):
+                        status(bridge, 'blocked', transaction, player.steam_id)
+                    controller.set_peers([])
+                    for bridge, transaction, player in zip(bridges, transactions, players):
+                        self.assertTrue((bridge._root/f'restore-{transaction}.json').exists())
+                        # Native completion removes the restore marker, retains
+                        # the transaction in status, and writes a terminal result.
+                        (bridge._root/f'restore-{transaction}.json').unlink()
+                        ipc._write_json(bridge._root/'results'/f'{transaction}.json',
+                            dict(state='restored', target=player.steam_id, transaction=transaction, message='done'))
+                        status(bridge, 'restored', transaction, player.steam_id)
+                    controller.tick()
+                    self.assertFalse(controller.assigned, 'completed departed targets retained')
+                    for bridge, transaction in zip(bridges, transactions):
+                        self.assertEqual(bridge.status['state'], 'restored')
+                        self.assertFalse((bridge._root/f'restore-{transaction}.json').exists(), 'completed restore reissued')
+                launch.assert_not_called()
+            finally:
+                controller.stop()
+
     def test_two_nonfriends_hold_in_independent_slots(self):
         self.opening([peer(1), peer(2)])
         self.assertEqual([b.begins for b in self.bridges], [[peer(1).steam_id], [peer(2).steam_id]])

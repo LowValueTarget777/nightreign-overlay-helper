@@ -292,6 +292,25 @@ class IdentityBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.status["state"], "restored")
         self.assertTrue(self.bridge.begin("76561198049468924"))
 
+    def test_restore_is_noop_for_completed_or_rejected_transaction(self):
+        for terminal in ('restored', 'error', 'idle'):
+            with self.subTest(terminal=terminal):
+                self.status()
+                self.bridge.start()
+                self.assertTrue(self.bridge.begin('76561198049468923'))
+                transaction = self.bridge._pending
+                ipc._write_json(self.root/'results'/f'{transaction}.json', dict(
+                    state='error' if terminal == 'error' else 'restored', target='76561198049468923',
+                    transaction=transaction, message='done'))
+                self.status(terminal, transaction)
+                self.bridge._poll()
+                self.assertFalse(self.bridge.pending)
+                self.bridge.hold_target = '76561198049468923'
+                self.bridge.restore()
+                self.assertEqual(self.bridge.hold_target, '')
+                self.assertEqual(self.bridge.status['state'], terminal)
+                self.assertFalse((self.root/f'restore-{transaction}.json').exists())
+
     def test_unrelated_terminal_status_does_not_clear_active_request(self):
         transaction = self.begin()
         self.status("restored", "a" * 32)
