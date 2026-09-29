@@ -21,7 +21,11 @@ from .service import resolve_helper_path
 _STATES = {"idle", "preparing", "blocked", "restoring", "restored", "recovery_pending", "error"}
 _FINAL = {"restored", "error"}
 _STEAM_LIFECYCLE = "on_demand_v1"
+_MATCH_LIFECYCLE = "match_hold_v2"
 _BUSY = {"preparing", "blocked", "restoring", "recovery_pending"}
+_PREPARATION_CODES = {"browser_start", "page_timeout", "page_controls", "page_account",
+                      "page_preblocked", "prepare_cancelled", "steam_account", "peer_departed",
+                      "relationship_excluded", "journal_write", "prepare_unknown"}
 
 
 def identity_directory() -> Path:
@@ -72,7 +76,7 @@ class IdentityBridge(QObject):
         self._slot = slot
         self.hold_target = ""
         self._root = identity_directory() if slot is None else identity_directory() / f"match-{slot}"
-        self._lifecycle = _STEAM_LIFECYCLE if slot is None else "match_hold_v1"
+        self._lifecycle = _STEAM_LIFECYCLE if slot is None else _MATCH_LIFECYCLE
         self._client = uuid.uuid4().hex
         self._pending: str | None = None
         self._pending_since = 0.0
@@ -177,6 +181,8 @@ class IdentityBridge(QObject):
         if value.get("state") not in _STATES:
             return
         result = {key: value.get(key, "") for key in ("state", "target", "transaction", "message")}
+        code = value.get("diagnostic_code", "")
+        result["diagnostic_code"] = code if isinstance(code, str) and code in _PREPARATION_CODES else ""
         result["accepts_begin"] = allow_begin and bool(value.get("accepts_begin", False))
         if result != self.status:
             self.status = result
@@ -191,11 +197,12 @@ class IdentityBridge(QObject):
             # Only allowlisted state and booleans enter diagnostics. The UI may
             # contain player IDs or remote error text; none of that is logged.
             diagnostic = (self.status.get("state") if self.status.get("state") in _STATES else "unknown",
-                          self._compatible_worker, bool(self.status.get("accepts_begin")), self._pending is not None)
+                          self._compatible_worker, bool(self.status.get("accepts_begin")), self._pending is not None,
+                          self.status.get("diagnostic_code", ""))
             if diagnostic != self._last_status_log:
                 self._last_status_log = diagnostic
-                state, compatible, accepts, pending = diagnostic
-                info(f"Identity worker state={state} compatible={compatible} accepts_begin={accepts} pending={pending} slot={self._slot if self._slot is not None else 'legacy'}")
+                state, compatible, accepts, pending, code = diagnostic
+                info(f"Identity worker state={state} compatible={compatible} accepts_begin={accepts} pending={pending} slot={self._slot if self._slot is not None else 'legacy'} reason={code or 'none'}")
 
     def _warn_worker(self, reason, helper, exitcode=None):
         # A failed child may be retried every five seconds. Keep the first
@@ -228,10 +235,12 @@ class IdentityBridge(QObject):
                 fresh = -5 <= age < 8
             except (KeyError, ValueError, TypeError):
                 pass
+        completion = None
         if self._pending:
             result = _read_json(self._root / "results" / (self._pending + ".json"))
             if result and result.get("transaction") == self._pending and result.get("state") in _FINAL:
                 self._pending = None
+                completion = result
                 self._apply(result)
         if fresh:
             if self._pending and value.get("transaction") == self._pending and value.get("state") in _FINAL:
@@ -264,7 +273,12 @@ class IdentityBridge(QObject):
                 self._set("error", "识别请求未完成，未发现待恢复操作；可以重试",
                           self.status.get("target", ""), lost)
                 return
-            if self._pending is None or value.get("transaction") == self._pending or value.get("state") == "recovery_pending":
+            if (completion is not None and self.status.get("diagnostic_code")
+                    and value.get("state") in {"idle", "restored", "error"}):
+                # Give the controller/log one poll to observe a durable result
+                # even if the worker has already returned to idle.
+                self._apply(completion)
+            elif self._pending is None or value.get("transaction") == self._pending or value.get("state") == "recovery_pending":
                 self._apply(value, allow_begin=True)
             return
         self._drop_lease()

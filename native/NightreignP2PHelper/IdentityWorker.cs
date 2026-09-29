@@ -15,6 +15,7 @@ internal static class IdentityWorker
     private static readonly Stopwatch Clock = Stopwatch.StartNew();
     private static string state = "preparing", message = "正在检查通信恢复记录", account = "", target = "", transaction = "";
     private static bool acceptsBegin;
+    private static string diagnosticCode = "";
     private static DateTimeOffset lastClient = DateTimeOffset.UtcNow;
 
     internal static int Run(int? matchSlot = null)
@@ -230,19 +231,46 @@ internal static class IdentityWorker
         Set("preparing", "正在确认队友和原始通信状态");
         IdentityJournal? journal = null;
         IdentityHtmlSession? html = null;
+        string stage = "prepare_unknown";
         try
         {
-            if (target == account || !ActivePeer(target)) throw new InvalidOperationException();
-            var original = (int)SteamFriends.GetFriendRelationship(new CSteamID(ulong.Parse(target)));
-            // Match mode excludes friends and every ambiguous relationship.
-            if (matchMode && (original != 0 || !HoldAuthorized(request))) throw new InvalidOperationException();
-            html = new IdentityHtmlSession(account, target, Tick);
-            var page = html.Inspect();
-            if (!IdentityRules.CanBegin(original, page.CorrectAccount, page.CanBlock, page.CanUnblock)
-                || !ClientAlive(request.Client) || RequestedRestore(transaction) || !ActivePeer(target)
-                || SteamUser.GetSteamID().ToString() != account
-                || (matchMode && (!HoldAuthorized(request)
-                    || (int)SteamFriends.GetFriendRelationship(new CSteamID(ulong.Parse(target))) != 0))) throw new InvalidOperationException();
+            int original = 0;
+            void Validate()
+            {
+                if (!ClientAlive(request.Client) || RequestedRestore(transaction)
+                    || (matchMode && !HoldAuthorized(request)))
+                    throw new IdentityPreparationException("prepare_cancelled", "请求已取消或助手续约失效，未修改通信状态");
+                if (!SteamUser.BLoggedOn() || SteamUser.GetSteamID().ToString() != account)
+                    throw new IdentityPreparationException("steam_account", "Steam 原账号已离线或切换，未修改通信状态");
+                if (!GameRunning() || target == account || !ActivePeer(target))
+                    throw new IdentityPreparationException("peer_departed", "游戏已退出或队友已离开，未修改通信状态");
+                original = (int)SteamFriends.GetFriendRelationship(new CSteamID(ulong.Parse(target)));
+                if (matchMode ? original != 0 : original is not (0 or 3))
+                    throw new IdentityPreparationException("relationship_excluded", "好友或不符合条件的通信关系，未修改通信状态");
+            }
+            html = IdentityPreparation.Run(() =>
+            {
+                IdentityHtmlSession? candidate = null;
+                try
+                {
+                    stage = "browser_start";
+                    try { candidate = new IdentityHtmlSession(account, target, Tick); }
+                    catch (Exception e) when (e is TimeoutException or InvalidOperationException)
+                    { throw new IdentityPreparationException(stage, "Steam 网页组件启动失败或超时", true); }
+                    stage = "page_timeout";
+                    IdentityPage page;
+                    try { page = candidate.Inspect(); }
+                    catch (TimeoutException)
+                    { throw new IdentityPreparationException(stage, "Steam 网页通信状态核验超时", true); }
+                    IdentityPreparation.ValidatePage(page);
+                    Validate();
+                    return candidate;
+                }
+                catch { candidate?.Dispose(); throw; }
+            }, Validate, Sleep, (attempt, failure) =>
+                Set("preparing", $"{failure.Message}；正在重试准备（{attempt}/3）", code: failure.Code),
+                matchMode ? 3 : 1);
+            stage = "journal_write";
             var prepared = new IdentityJournal(account, target, transaction, original, false, false, true, DateTimeOffset.UtcNow);
             Save(prepared); // Failure here forbids sending block=1.
             journal = prepared; // Only now is there a transaction requiring compensation.
@@ -262,7 +290,7 @@ internal static class IdentityWorker
                     return;
                 }
             }
-            page = html.Inspect(3500);
+            var page = html.Inspect(3500);
             if (page.CorrectAccount && page.CanUnblock && !page.CanBlock)
             {
                 journal = journal with { BlockObserved = true }; TrySave(journal);
@@ -277,12 +305,16 @@ internal static class IdentityWorker
                         () => ClientAlive(request.Client), () => RequestedRestore(transaction), () => ActivePeer(target));
             }
         }
-        catch
+        catch (Exception failure)
         {
             if (journal is null)
             {
-                Set("error", "未开始识别：队友已离开、网页未登录，或原通信状态不明确", true);
-                Result(transaction, target, state, message);
+                var preparation = failure as IdentityPreparationException;
+                Set("error", preparation is null
+                    ? $"准备阶段失败（{stage}），未执行屏蔽"
+                    : $"{preparation.Message}；本次准备已停止，未执行屏蔽", true,
+                    preparation?.Code ?? stage);
+                Result(transaction, target, state, message, diagnosticCode);
             }
         }
         finally
@@ -396,14 +428,14 @@ internal static class IdentityWorker
         catch { return false; }
     }
     private static void Disconnect() => IdentitySessionCoordinator.Release(ref steamReady, SteamAPI.Shutdown);
-    private static void Result(string id, string peer, string resultState, string resultMessage)
+    private static void Result(string id, string peer, string resultState, string resultMessage, string code = "")
     {
         try { IdentityFiles.Write(Path.Combine(Root, "results", id + ".json"),
-            new { state = resultState, target = peer, transaction = id, message = resultMessage }); }
+            new { state = resultState, target = peer, transaction = id, message = resultMessage, diagnostic_code = code }); }
         catch { } // The durable journal, rather than UI telemetry, owns recovery.
     }
-    private static void Set(string next, string detail, bool canBegin = false)
-    { state = next; message = detail; acceptsBegin = canBegin; Tick(true); }
+    private static void Set(string next, string detail, bool canBegin = false, string code = "")
+    { state = next; message = detail; acceptsBegin = canBegin; diagnosticCode = code; Tick(true); }
     private static void Tick() => Tick(false);
     private static void Tick(bool force)
     {
@@ -412,9 +444,9 @@ internal static class IdentityWorker
         try
         {
             IdentityFiles.Write(Path.Combine(Root, "status.json"), new {
-                state, target, transaction, message, account, accepts_begin = acceptsBegin,
+                state, target, transaction, message, account, accepts_begin = acceptsBegin, diagnostic_code = diagnosticCode,
                 updated_at = DateTimeOffset.UtcNow, worker_pid = Environment.ProcessId,
-                steam_lifecycle = matchMode ? "match_hold_v1" : "on_demand_v1"
+                steam_lifecycle = matchMode ? "match_hold_v2" : "on_demand_v1"
             });
         }
         catch { } // Never let a full disk disable the browser/native restore watchdog.

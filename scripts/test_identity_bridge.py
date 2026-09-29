@@ -69,13 +69,32 @@ class IdentityBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.status["state"], "idle")
         self.assertTrue((self.root / "clients" / (self.bridge._client + ".json")).is_file())
 
+    def test_preparation_failure_code_survives_result_and_is_logged(self):
+        transaction = self.begin()
+        ipc._write_json(self.root/'results'/f'{transaction}.json', dict(state='error',
+            target='76561198049468923', transaction=transaction, message='private details', diagnostic_code='page_timeout'))
+        self.bridge._poll()
+        self.assertEqual(self.bridge.status['diagnostic_code'], 'page_timeout')
+        self.assertFalse(self.bridge.pending)
+        logs = str(self.log_info.call_args_list)
+        self.assertIn('reason=page_timeout', logs)
+        self.assertNotIn('private details', logs)
+
+    def test_untrusted_preparation_code_never_enters_logs(self):
+        for code in ('remote text or account', {'bad': 'type'}):
+            self.status(diagnostic_code=code)
+            self.bridge.start()
+            self.bridge._poll()
+            self.assertEqual(self.bridge.status['diagnostic_code'], '')
+        self.assertNotIn('remote text', str(self.log_info.call_args_list))
+
     def test_match_slots_isolate_requests_and_publish_target_lease(self):
         bridges = [ipc.IdentityBridge(slot=i) for i in (0, 1)]
         try:
             for i, bridge in enumerate(bridges):
                 root = self.root / f"match-{i}"
                 ipc._write_json(root / 'status.json', dict(state='idle', target='', transaction='', message='',
-                    accepts_begin=True, updated_at=datetime.now(timezone.utc).isoformat(), steam_lifecycle='match_hold_v1'))
+                    accepts_begin=True, updated_at=datetime.now(timezone.utc).isoformat(), steam_lifecycle=ipc._MATCH_LIFECYCLE))
                 bridge.hold_target = str(76561198049468923+i)
                 bridge.start()
                 self.assertTrue(bridge.begin(bridge.hold_target))
@@ -94,10 +113,12 @@ class IdentityBridgeTests(unittest.TestCase):
         try:
             bridge.start()
             self.launch.assert_called_once_with(self.helper, 1)
-            ipc._write_json(self.root/'match-1'/'status.json', dict(state='idle', target='', transaction='',
-                message='', accepts_begin=True, updated_at=datetime.now(timezone.utc).isoformat(), steam_lifecycle=ipc._STEAM_LIFECYCLE))
-            bridge._poll()
-            self.assertFalse(bridge.begin('76561198049468923'))
+            for lifecycle in (ipc._STEAM_LIFECYCLE, 'match_hold_v1'):
+                ipc._write_json(self.root/'match-1'/'status.json', dict(state='idle', target='', transaction='',
+                    message='', accepts_begin=True, updated_at=datetime.now(timezone.utc).isoformat(), steam_lifecycle=lifecycle))
+                bridge._poll()
+                self.assertFalse(bridge.begin('76561198049468923'))
+                self.assertFalse((bridge._root/'clients'/(bridge._client+'.json')).exists())
         finally: bridge.stop()
 
     def test_start_launches_detached_recovery_when_status_stale(self):

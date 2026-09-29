@@ -145,6 +145,7 @@ internal static class Program
             finally { Directory.Delete(root, recursive: true); }
         });
         IdentitySessionTests.Run(Test);
+        IdentityPreparationTests.Run(Test);
         Console.WriteLine($"{passed} offline recovery/lifecycle tests passed; no Steam calls.");
         return 0;
     }

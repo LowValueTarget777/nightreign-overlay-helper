@@ -82,7 +82,7 @@ class MatchPolicyTests(unittest.TestCase):
             def status(bridge, state, transaction='', target=''):
                 ipc._write_json(bridge._root/'status.json', dict(state=state, transaction=transaction, target=target,
                     message='test', accepts_begin=state in {'idle', 'restored', 'error'},
-                    steam_lifecycle='match_hold_v1', updated_at=datetime.now(timezone.utc).isoformat()))
+                    steam_lifecycle=ipc._MATCH_LIFECYCLE, updated_at=datetime.now(timezone.utc).isoformat()))
                 bridge._poll()
             try:
                 for bridge in bridges:
@@ -125,6 +125,21 @@ class MatchPolicyTests(unittest.TestCase):
         self.assertEqual([b.begins for b in self.bridges], [[peer(1).steam_id], [peer(2).steam_id]])
         self.feed([peer(1, 5), peer(2, 5)], 600)
         self.assertEqual([b.restores for b in self.bridges], [0, 0])
+
+    def test_second_preparation_can_retry_past_opening_without_restarting_first(self):
+        self.opening([peer(1), peer(2)])
+        self.bridges[0].status.update(state='blocked')
+        for _ in range(60):
+            self.feed([peer(1, 5), peer(2)])
+        self.assertEqual(self.bridges[1].status['state'], 'preparing')
+        self.assertEqual(self.bridges[1].hold_target, peer(2).steam_id)
+        self.assertEqual([b.restores for b in self.bridges], [0, 0])
+        self.assertEqual([len(b.begins) for b in self.bridges], [1, 1])
+        self.bridges[1].status.update(state='blocked')
+        self.feed([peer(1, 5), peer(2, 5)])
+        self.assertEqual(len(self.controller.assigned), 2)
+        self.feed([peer(1, 5)])
+        self.assertEqual([b.restores for b in self.bridges], [0, 1])
 
     def test_friend_unknown_and_preblocked_are_excluded(self):
         for relationship in (None, 1, 2, 3, 4, 5, 6):
