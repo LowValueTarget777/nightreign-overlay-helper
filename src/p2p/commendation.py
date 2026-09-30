@@ -8,6 +8,7 @@ import time
 from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 from src.common import get_appdata_path
+from src.logger import info
 from .identity_bridge import _read_json, _write_json, identity_directory
 from .service import resolve_helper_path
 
@@ -45,10 +46,11 @@ class CommendationService(QObject):
         self.recent = []
         self.last_day_one = float('-inf')
         self.last_snapshot = float('-inf')
-        self.empty_since = None
+        self.departures = {}
+        self.reported = set()
         self.feedback = {}
         self.busy_target = ''
-        self.review_until = 0.0
+        self.reviews = {}
         self._response = bytearray()
         self.recent_path = Path(recent_path or get_appdata_path('recent_teammates.json'))
         saved = _read_json(self.recent_path) or {}
@@ -70,25 +72,33 @@ class CommendationService(QObject):
     def configure(self, enabled, comment):
         self.enabled = bool(enabled)
         self.comment = comment.strip()
+        if not self.enabled:
+            self.reviews.clear()
+            self.roster.clear()
+            self.departures.clear()
+            self.reported.clear()
+            self._tracking = False
         self._publish()
 
     def set_peers(self, peers):
-        self.peers = [p for p in peers if valid_id(p.steam_id) and p.state == 'connected'][:2]
+        self.peers = [p for p in peers if valid_id(p.steam_id) and p.state in {'connected', 'connecting'}][:2]
         self.last_snapshot = self.clock()
         if self.roster:
             for p in self.peers:
                 if p.steam_id in self.roster or len(self.roster) < 2:
                     self.roster[p.steam_id] = dict(steam_id=p.steam_id, name=p.name[:128])
-            if self.peers:
-                self.empty_since = None
-            elif self.empty_since is None:
-                self.empty_since = self.clock()
+            present = {p.steam_id for p in self.peers}
+            for target in self.roster:
+                if target in present:
+                    self.departures.pop(target, None)
+                elif target not in self.reported:
+                    self.departures.setdefault(target, self.clock())
         self.tick()
 
     def set_status(self, status):
         if status.state != 'steam_ready':
             self.last_snapshot = float('-inf')
-            self.empty_since = None
+            self.departures.clear()
         if status.state == 'waiting_for_game' and self.roster:
             self.finish_match()
 
@@ -98,41 +108,70 @@ class CommendationService(QObject):
             return
         if self.roster:
             self.finish_match(show=False)
-        self.review_until = 0.0
+        self.reviews.clear()
         self._publish()
         self.last_day_one = detected_at
         self.roster = {p.steam_id: dict(steam_id=p.steam_id, name=p.name[:128]) for p in self.peers}
         self._tracking = True
-        self.empty_since = None
+        self.departures.clear()
+        self.reported.clear()
+        info(f"Commendation: expedition roster started peers={len(self.roster)}")
+
+    def _show_players(self, players):
+        if not players:
+            return
+        self.recent = list(self.roster.values())[:2] or players[:2]
+        try:
+            _write_json(self.recent_path, dict(players=self.recent))
+        except OSError:
+            self.status_changed.emit('无法保存上局队友，当前仍可点击点赞')
+        for row in players:
+            self.reviews[row['steam_id']] = dict(**row, until=self.clock() + REVIEW_SECONDS)
+        info(f"Commendation: departure review opened peers={len(players)} seconds={REVIEW_SECONDS}")
 
     def finish_match(self, *, show=True):
         """Also exposed as a manual tray action for teams that stay in the lobby."""
         players = list(self.roster.values()) or [dict(steam_id=p.steam_id, name=p.name[:128]) for p in self.peers]
-        if players:
-            self.recent = players[:2]
-            try:
-                _write_json(self.recent_path, dict(players=self.recent))
-            except OSError:
-                self.status_changed.emit('无法保存上局队友，当前仍可点击点赞')
+        if players and show:
+            self._show_players([p for p in players if p['steam_id'] not in self.reported])
         self.roster = {}
         self._tracking = False
-        self.empty_since = None
-        self.review_until = self.clock() + REVIEW_SECONDS if players and show else 0.0
+        self.departures.clear()
+        self.reported.clear()
+        if not show:
+            self.reviews.clear()
         self._publish()
 
     def tick(self):
         # DAY1 may arrive just before Steam's first teammate snapshot.
         if getattr(self, '_tracking', False) and not self.roster and self.peers:
             self.roster = {p.steam_id: dict(steam_id=p.steam_id, name=p.name[:128]) for p in self.peers}
-        if (self.roster and self.empty_since is not None and self.clock() - self.empty_since >= 3
-                and 0 <= self.clock() - self.last_snapshot <= 5):
-            self.finish_match()
+        if 0 <= self.clock() - self.last_snapshot <= 5:
+            left = [target for target, since in self.departures.items() if self.clock() - since >= 3]
+            if left:
+                self._show_players([self.roster[target] for target in left])
+                self.reported.update(left)
+                for target in left:
+                    del self.departures[target]
+                if not self.peers and self.reported.issuperset(self.roster):
+                    self.roster = {}
+                    self._tracking = False
+                    self.reported.clear()
+        else:
+            # A silent helper/network gap is not continuous fresh evidence of
+            # departure. Restart the three-second confirmation on reconnection.
+            self.departures.clear()
+        for target, row in list(self.reviews.items()):
+            if self.clock() >= row['until']:
+                del self.reviews[target]
         self._publish()
 
     def _publish(self):
         account = current_steam_account()
         rows = []
-        for p in self.recent if self.enabled and self.clock() < self.review_until else []:
+        for p in self.reviews.values() if self.enabled else []:
+            if self.clock() >= p['until']:
+                continue
             target = p['steam_id']
             text = self.feedback.get(target, '点击名字留言点赞')
             can_send = not self.busy_target
@@ -150,14 +189,14 @@ class CommendationService(QObject):
                         text, can_send = '记录异常，请先核对主页', False
             if target == self.busy_target:
                 text = '正在发送留言…'
-            rows.append(dict(**p, status=text, enabled=can_send, comment=self.comment))
+            rows.append(dict(steam_id=target, name=p['name'], status=text, enabled=can_send, comment=self.comment))
         if rows != getattr(self, '_last_rows', None):
             self._last_rows = rows
             self.rows_changed.emit(rows)
 
     def send(self, target):
-        if (not self.enabled or self.clock() >= self.review_until or self.busy_target
-                or not any(p['steam_id'] == target for p in self.recent)):
+        if (not self.enabled or self.busy_target or target not in self.reviews
+                or self.clock() >= self.reviews[target]['until']):
             return
         if not self.comment or len(self.comment) > 500 or '\0' in self.comment:
             self.status_changed.emit('请在设置中填写 1–500 字留言')
@@ -177,6 +216,10 @@ class CommendationService(QObject):
         self.process.setArguments(['--commend'])
         self.process.setWorkingDirectory(str(helper.parent))
         self.process.start()
+        self._publish()
+
+    def dismiss(self):
+        self.reviews.clear()
         self._publish()
 
     def _write_request(self):

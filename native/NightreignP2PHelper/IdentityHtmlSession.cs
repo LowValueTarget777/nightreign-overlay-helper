@@ -24,6 +24,9 @@ internal sealed class IdentityHtmlSession : IDisposable
     private bool initialized;
     internal bool BlockSettled { get; private set; }
     internal bool CommentsReady { get; private set; }
+    internal int InspectionProbes { get; private set; }
+    internal int InspectionReplies { get; private set; }
+    internal object InspectionState { get; private set; } = new { };
     internal string Profile => "https://steamcommunity.com/profiles/" + target + "/";
 
     internal IdentityHtmlSession(string account, string target, Action tick)
@@ -42,7 +45,7 @@ internal sealed class IdentityHtmlSession : IDisposable
             callbacks.Add(Callback<HTML_FinishedRequest_t>.Create(x => {
                 if (x.unBrowserHandle == verifier && IsProfile(x.pchURL)
                     && new Uri(x.pchURL).Query == "?nr_identity=" + inspectionToken)
-                    inspectAt = clock.ElapsedMilliseconds + 400;
+                    inspectAt = Math.Min(inspectAt == 0 ? long.MaxValue : inspectAt, clock.ElapsedMilliseconds + 400);
             }));
             callbacks.Add(Callback<HTML_ChangedTitle_t>.Create(OnTitle));
             control = Create();
@@ -55,8 +58,7 @@ internal sealed class IdentityHtmlSession : IDisposable
     private bool Owns(HHTMLBrowser handle) => handle != HHTMLBrowser.Invalid && (handle == control || handle == verifier);
     private static bool Allowed(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
         && uri.Scheme == "https" && uri.Host is "steamcommunity.com" or "store.steampowered.com" or "login.steampowered.com";
-    private bool IsProfile(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
-        && uri.Scheme == "https" && uri.Host == "steamcommunity.com" && uri.AbsolutePath == "/profiles/" + target + "/";
+    private bool IsProfile(string value) => IdentityProfileAddress.IsCandidate(value, target);
 
     private HHTMLBrowser Create()
     {
@@ -73,16 +75,26 @@ internal sealed class IdentityHtmlSession : IDisposable
         return value;
     }
 
-    internal IdentityPage Inspect(int timeoutMs = 12000)
+    internal IdentityPage Inspect(int timeoutMs = 45000)
     {
-        inspectionToken = Guid.NewGuid().ToString("N"); inspected = null; inspectAt = 0; CommentsReady = false;
+        inspectionToken = Guid.NewGuid().ToString("N"); inspected = null; CommentsReady = false;
+        InspectionProbes = InspectionReplies = 0;
+        // FinishedRequest is not guaranteed to arrive for an otherwise usable
+        // page (long-lived resources can keep it loading). Poll the DOM while
+        // keeping the navigation token/account fence on every reply.
+        inspectAt = clock.ElapsedMilliseconds + 400;
         SteamHTMLSurface.LoadURL(verifier, Profile + "?nr_identity=" + inspectionToken, null);
         Pump(() => inspected != null, timeoutMs);
         return inspected ?? throw new TimeoutException("无法核对 Steam 屏蔽状态，请保持 Steam 在线");
     }
 
+    private string ProfileGuard => $$"""
+        location.origin==='https://steamcommunity.com' &&
+        (location.pathname==='/profiles/{{target}}/'||/^\/id\/[^/]+\/?$/.test(location.pathname)) &&
+        String(window.g_rgProfileData?.steamid||'')==='{{target}}'
+        """;
     private string Guard => $$"""
-        location.origin==='https://steamcommunity.com' && location.pathname==='/profiles/{{target}}/' &&
+        ({{ProfileGuard}}) &&
         String(window.g_steamID||'')==='{{account}}' && typeof window.g_sessionID==='string'
         """;
 
@@ -229,9 +241,17 @@ internal sealed class IdentityHtmlSession : IDisposable
             SteamAPI.RunCallbacks(); tick();
             if (inspectAt != 0 && clock.ElapsedMilliseconds >= inspectAt)
             {
-                inspectAt = 0;
+                InspectionProbes++;
+                inspectAt = clock.ElapsedMilliseconds + 400;
                 SteamHTMLSurface.ExecuteJavascript(verifier, $$"""
                     document.title='NRIDENT:'+JSON.stringify({token:'{{inspectionToken}}',page:true,
+                      probe:{{InspectionProbes}},
+                      origin_ok:location.origin==='https://steamcommunity.com',
+                      path_ok:location.pathname==='/profiles/{{target}}/',
+                      token_ok:location.search==='?nr_identity={{inspectionToken}}',
+                      dom_ready:document.readyState!=='loading',
+                      profile_ok:String(window.g_rgProfileData?.steamid||'')==='{{target}}',
+                      loaded:({{ProfileGuard}})&&location.search==='?nr_identity={{inspectionToken}}'&&document.readyState!=='loading',
                       account:({{Guard}})&&location.search==='?nr_identity={{inspectionToken}}'&&!!document.querySelector('#account_pulldown'),
                       block:!!document.querySelector('[onclick*="ConfirmBlock"],a[href*="ConfirmBlock"]'),
                       unblock:!!document.querySelector('[onclick*="ConfirmUnblock"],a[href*="ConfirmUnblock"]'),
@@ -254,8 +274,15 @@ internal sealed class IdentityHtmlSession : IDisposable
             bool Flag(string name) => root.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.True;
             if (x.unBrowserHandle == verifier && token == inspectionToken && Flag("page"))
             {
-                inspected = new(Flag("account"), Flag("block"), Flag("unblock"), Flag("friend"));
-                CommentsReady = Flag("comments");
+                InspectionReplies++;
+                InspectionState = new { origin_ok = Flag("origin_ok"), path_ok = Flag("path_ok"), token_ok = Flag("token_ok"),
+                    dom_ready = Flag("dom_ready"), profile_ok = Flag("profile_ok") };
+                if (Flag("loaded"))
+                {
+                    inspected = new(Flag("account"), Flag("block"), Flag("unblock"), Flag("friend"));
+                    CommentsReady = Flag("comments");
+                    inspectAt = 0;
+                }
             }
             else if (x.unBrowserHandle == control || (x.unBrowserHandle == verifier && actionTokens.Contains(token)))
             {

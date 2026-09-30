@@ -22,6 +22,8 @@ internal static class Program
             return CommendationWorker.Run();
         if (args.SequenceEqual(new[] { "--commend-check" }))
             return CommendationWorker.Run(checkOnly: true);
+        if (args.SequenceEqual(new[] { "--identity-inspect" }))
+            return CommendationWorker.Run(inspectOnly: true);
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.InputEncoding = System.Text.Encoding.UTF8;
 

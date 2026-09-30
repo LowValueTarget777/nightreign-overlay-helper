@@ -68,6 +68,83 @@ class MatchPolicyTests(unittest.TestCase):
         self.feed([peer()])
         self.assertEqual(self.bridges[0].begins, [peer().steam_id])
 
+    def test_prepare_timeout_retries_after_backoff_and_backoff_grows(self):
+        self.feed([peer()])
+        bridge = self.bridges[0]
+        for delay in (30, 60, 120, 180):
+            bridge._pending = None
+            bridge.status.update(state='error', diagnostic_code='page_timeout', accepts_begin=True)
+            self.controller.tick()
+            count = len(bridge.begins)
+            self.feed([peer()], delay-1)
+            self.assertEqual(len(bridge.begins), count)
+            self.feed([peer()])
+            self.assertEqual(len(bridge.begins), count+1)
+
+    def test_real_bridge_result_is_not_lost_when_idle_heartbeat_follows(self):
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from src.p2p import identity_bridge as ipc
+        with TemporaryDirectory() as directory, patch.object(ipc, 'identity_directory', return_value=Path(directory)), patch.object(ipc, '_launch_worker'):
+            bridges = [ipc.IdentityBridge(slot=i) for i in (0, 1)]
+            controller = MatchBlockController(bridges=bridges, legacy=Bridge(), clock=lambda: self.now)
+            try:
+                for bridge in bridges:
+                    ipc._write_json(bridge._root/'status.json', dict(state='idle', message='test', accepts_begin=True,
+                        steam_lifecycle=ipc._MATCH_LIFECYCLE, updated_at=datetime.now(timezone.utc).isoformat()))
+                    bridge.start()
+                    bridge._timer.stop()
+                controller.set_enabled(True)
+                controller.set_peers([peer()])
+                first = bridges[0]._pending
+                self.assertIsNotNone(first)
+                (bridges[0]._root/'requests'/f'{first}.json').unlink()
+                ipc._write_json(bridges[0]._root/'results'/f'{first}.json', dict(state='error', target=peer().steam_id,
+                    transaction=first, message='timeout', diagnostic_code='page_timeout'))
+                # The native status has already returned to idle; completion
+                # must still arm retry before its diagnostic gets overwritten.
+                bridges[0]._poll()
+                self.assertIn(peer().steam_id, controller.retry_at)
+                self.assertFalse(controller.assigned)
+                self.now += 30
+                controller.set_peers([peer()])
+                pending = [b._pending for b in bridges if b.pending]
+                self.assertEqual(len(pending), 1)
+                self.assertNotEqual(pending[0], first)
+                self.assertEqual(len(controller.assigned), 1, 'reentrant preparation assigned target twice')
+            finally:
+                controller.stop()
+
+    def test_friend_or_departure_cancels_retry_and_mutation_outcomes_never_retry(self):
+        self.feed([peer()])
+        bridge = self.bridges[0]
+        bridge._pending = None
+        bridge.status.update(state='error', diagnostic_code='page_controls', accepts_begin=True)
+        self.controller.tick()
+        self.feed([peer(1, 3)], 31)
+        self.assertEqual(len(bridge.begins), 1)
+        self.feed([])
+        self.assertFalse(self.controller.retry_at)
+        self.feed([peer()])
+        bridge._pending = None
+        bridge.status.update(state='restored', diagnostic_code='', accepts_begin=True)
+        self.controller.tick()
+        self.feed([peer()], 200)
+        self.assertEqual(len(bridge.begins), 2)
+
+    def test_two_failures_retry_independently_and_toggle_off_stops_retry(self):
+        self.feed([peer(1), peer(2)])
+        for bridge in self.bridges:
+            bridge._pending = None
+            bridge.status.update(state='error', diagnostic_code='browser_start', accepts_begin=True)
+        self.controller.tick()
+        self.controller.set_enabled(False)
+        self.feed([peer(1), peer(2)], 31)
+        self.assertEqual([len(b.begins) for b in self.bridges], [1, 1])
+        self.controller.set_enabled(True)
+        self.assertEqual([len(b.begins) for b in self.bridges], [2, 2])
+
     def test_missing_or_invalid_ping_waits_then_valid_ping_starts(self):
         from dataclasses import replace
         for ping in (None, -1, True):

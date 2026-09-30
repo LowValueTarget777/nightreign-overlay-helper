@@ -5,6 +5,17 @@ internal static class IdentityPreparationTests
     private static void Assert(bool ok, string reason) { if (!ok) throw new Exception(reason); }
     internal static void Run(Action<string, Action> test)
     {
+        test("numeric and redirected vanity profiles remain inspectable", () => {
+            Assert(IdentityProfileAddress.IsCandidate("https://steamcommunity.com/profiles/76561198049468923/?nr_identity=abc", "76561198049468923"), "numeric rejected");
+            Assert(IdentityProfileAddress.IsCandidate("https://steamcommunity.com/id/teammate/?nr_identity=abc", "76561198049468923"), "vanity redirect rejected");
+        });
+        test("untrusted origins wrong numeric targets and nonprofile paths rejected", () => {
+            foreach (var url in new[] { "http://steamcommunity.com/id/player/", "https://steamcommunity.com.evil.test/id/player/",
+                "https://steamcommunity.com:4433/id/player/", "https://evil@steamcommunity.com/id/player/",
+                "https://steamcommunity.com/profiles/76561198049468924/", "https://steamcommunity.com/login/",
+                "https://steamcommunity.com/id/player/friends/" })
+                Assert(!IdentityProfileAddress.IsCandidate(url, "76561198049468923"), "unsafe candidate accepted");
+        });
         test("preflight timeout retries then blocks only once after success", () => {
             int reads = 0, blocks = 0, waited = 0; var retries = new List<int>();
             var ready = IdentityPreparation.Run(() => {

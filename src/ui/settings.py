@@ -586,7 +586,7 @@ class SettingsWindow(QWidget):
         self.match_block_checkbox.setChecked(False)
         self.match_block_checkbox.stateChanged.connect(self.update_match_block_enabled)
         layout.addWidget(self.match_block_checkbox)
-        hint = QLabel("好友一律跳过；非好友连接正常且有有效 Ping 即可尝试，无需等待 DAY1。离队、关闭开关或退出助手后解除。断网时保留恢复记录。")
+        hint = QLabel("好友一律跳过；非好友连接正常且有有效 Ping 即可尝试，无需等待 DAY1。网页准备超时后自动等待重试；离队、关闭开关或退出助手后解除。断网时保留恢复记录。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray;")
         layout.addWidget(hint)
@@ -600,17 +600,17 @@ class SettingsWindow(QWidget):
         self.commendation_checkbox = QCheckBox("显示对局后队友留言点赞入口")
         self.commendation_checkbox.setChecked(True)
         layout.addWidget(self.commendation_checkbox)
-        layout.addWidget(QLabel("点赞留言（点击上局队友名字后才发送，最多 500 字）"))
+        layout.addWidget(QLabel("点赞留言（点击点赞窗口的名字才发送，最多 500 字）"))
         self.commendation_text = QPlainTextEdit(DEFAULT_COMMENT)
         self.commendation_text.setMaximumHeight(90)
         self.commendation_text.textChanged.connect(self.update_commendation_settings)
         self.commendation_checkbox.stateChanged.connect(self.update_commendation_settings)
         layout.addWidget(self.commendation_text)
-        commend_hint = QLabel("每个 Steam 账号对同一队友间隔七天。DAY1 记录本局队友，连接离开后显示点赞区两分钟，下一局开始立即收起；留房可用右键菜单“结束本局”。仅尝试已开放的主页留言，结果不确定时暂停重复发送。")
+        commend_hint = QLabel("每个 Steam 账号对同一队友间隔七天。DAY1 记录本局队友，谁离开就单独弹出谁的点赞窗口，两分钟后关闭；留房可用右键菜单“结束本局”。下一局收起旧入口，点击才留言。")
         commend_hint.setWordWrap(True)
         commend_hint.setStyleSheet("color: gray;")
         layout.addWidget(commend_hint)
-        self.commendation_status = QLabel("点击上局队友名字，发送上方留言")
+        self.commendation_status = QLabel("点击点赞窗口的队友名字，发送上方留言")
         self.commendation_status.setWordWrap(True)
         layout.addWidget(self.commendation_status)
         if self.commendation is not None:
@@ -872,6 +872,13 @@ class SettingsWindow(QWidget):
             self.commendation_checkbox.setChecked(data.get("commendation_enabled", True))
             self.commendation_text.setPlainText(data.get("commendation_comment", self.commendation_text.toPlainText()))
             self.update_commendation_settings()
+            if self.commend_overlay is not None:
+                x, y = data.get('commendation_x'), data.get('commendation_y')
+                if type(x) is int and type(y) is int:
+                    if QApplication.screenAt(QPoint(x, y)) is not None:
+                        self.commend_overlay.move(x, y)
+                    else:
+                        self.commend_overlay.reset_position()
             self.update_p2p_thresholds()
             self.update_playtime_enabled()
             p2p_x = data.get("p2p_x")
@@ -963,6 +970,8 @@ class SettingsWindow(QWidget):
                 "p2p_opacity": self.p2p_opacity_slider.value(),
                 "p2p_x": self.p2p_overlay.x(),
                 "p2p_y": self.p2p_overlay.y(),
+                "commendation_x": self.commend_overlay.x() if self.commend_overlay is not None else None,
+                "commendation_y": self.commend_overlay.y() if self.commend_overlay is not None else None,
                 "p2p_good_ping": self.p2p_good_ping_spinbox.value(),
                 "p2p_warning_ping": self.p2p_warning_ping_spinbox.value(),
                 "p2p_playtime_enabled": self.playtime_enabled_checkbox.isChecked(),
@@ -1055,6 +1064,7 @@ class SettingsWindow(QWidget):
         playtime_service: SteamPlaytimeService,
         match_block=None,
         commendation=None,
+        commend_overlay=None,
     ):
         super().__init__()
         config = Config.get()
@@ -1067,7 +1077,10 @@ class SettingsWindow(QWidget):
         self.playtime_service = playtime_service
         self.match_block = match_block
         self.commendation = commendation
+        self.commend_overlay = commend_overlay
         self.update_p2p_overlay_ui_state_signal.connect(p2p_overlay.update_ui_state)
+        if commend_overlay is not None:
+            self.update_p2p_overlay_ui_state_signal.connect(commend_overlay.update_ui_state)
         self.p2p_service.status_changed.connect(self.update_p2p_status_display)
         self.playtime_service.status_changed.connect(self.update_playtime_status_display)
         self.updater = updater

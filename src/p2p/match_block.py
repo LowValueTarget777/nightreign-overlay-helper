@@ -10,6 +10,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from src.logger import info
 from .identity_bridge import IdentityBridge
 
+_RETRYABLE_PREPARATION = {'browser_start', 'page_timeout', 'page_controls', 'steam_connect', 'prepare_cancelled'}
 
 class MatchBlockController(QObject):
     status_changed = pyqtSignal(str)
@@ -26,11 +27,17 @@ class MatchBlockController(QObject):
         self.attempted = set()
         self.assigned = {}
         self.departed = set()
+        self.retry_at = {}
+        self.retry_count = {}
         self.message = "自动显示 Steam 名字已关闭"
         self._last_diagnostic = None
+        self._ticking = False
         self.timer = QTimer(self)
         self.timer.setInterval(250)
         self.timer.timeout.connect(self.tick)
+        for bridge in [self.legacy, *self.bridges]:
+            if hasattr(bridge, 'changed'):
+                bridge.changed.connect(self.tick)
 
     def start(self):
         for bridge in [self.legacy, *self.bridges]:
@@ -61,6 +68,9 @@ class MatchBlockController(QObject):
         # A failed/completed attempt stays suppressed for this continuous presence.
         # Departure permits a new attempt on a future encounter, after recovery.
         self.attempted.intersection_update(set(incoming) | set(self.assigned.values()))
+        for target in set(self.retry_at) - set(incoming):
+            self.retry_at.pop(target, None)
+            self.retry_count.pop(target, None)
         self.peers = incoming
         self.last_snapshot = now
         self.tick()
@@ -76,7 +86,18 @@ class MatchBlockController(QObject):
             self.message = value
             self.status_changed.emit(value)
 
-    def tick(self):
+    def tick(self, *_):
+        # Observe durable preparation errors when Bridge publishes them, before
+        # the native worker's next idle heartbeat can overwrite the result.
+        if self._ticking:
+            return
+        self._ticking = True
+        try:
+            self._tick()
+        finally:
+            self._ticking = False
+
+    def _tick(self):
         now = self.clock()
         fresh = 0 <= now - self.last_snapshot <= 5
         for index, target in list(self.assigned.items()):
@@ -89,6 +110,13 @@ class MatchBlockController(QObject):
                 del self.assigned[index]
                 if target not in self.peers or target in self.departed:
                     self.attempted.discard(target)
+                    self.retry_at.pop(target, None)
+                    self.retry_count.pop(target, None)
+                elif bridge.status.get('state') == 'error' and bridge.status.get('diagnostic_code') in _RETRYABLE_PREPARATION:
+                    count = self.retry_count.get(target, 0) + 1
+                    self.retry_count[target] = count
+                    self.retry_at[target] = now + min(180, 30 * (2 ** min(count-1, 3)))
+                    info(f"Match name: preparation retry scheduled slot={index} attempt={count} reason={bridge.status.get('diagnostic_code')}")
                 self.departed.discard(target)
                 info(f"Match name: slot released slot={index} state={bridge.status.get('state')}")
                 continue
@@ -110,6 +138,10 @@ class MatchBlockController(QObject):
                   'recovery_pending' if recovering else 'ping_ready')
         candidates = []
         if self.enabled and fresh and not recovering:
+            for target, deadline in list(self.retry_at.items()):
+                if now >= deadline:
+                    self.attempted.discard(target)
+                    del self.retry_at[target]
             candidates = [p for p in self.peers.values() if p.relationship == 0
                           and p.state == "connected" and type(p.ping_ms) is int and p.ping_ms >= 0
                           and p.steam_id not in self.attempted]
@@ -141,5 +173,6 @@ class MatchBlockController(QObject):
         elif not self.enabled:
             message = "自动显示 Steam 名字已关闭；无待恢复操作"
         else:
-            message = "已开启：读到非好友队友有效延迟后尝试屏蔽；好友一律跳过"
+            message = (f"网页准备失败，{max(1, int(min(self.retry_at.values())-now))} 秒后自动重试" if self.retry_at else
+                       "已开启：读到非好友队友有效延迟后尝试屏蔽；好友一律跳过")
         self._message(message)

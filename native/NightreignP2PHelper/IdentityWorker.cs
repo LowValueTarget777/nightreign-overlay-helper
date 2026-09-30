@@ -89,8 +89,9 @@ internal static class IdentityWorker
                         {
                             Set("error", result == IdentitySessionResult.Rejected
                                 ? "识别请求已取消或过期，或游戏尚未运行；未修改通信状态"
-                                : "无法连接 Steam，请登录后重试；未修改通信状态", true);
-                            Result(transaction, target, state, message);
+                                : "无法连接 Steam，请登录后重试；未修改通信状态", true,
+                                result == IdentitySessionResult.Unavailable ? "steam_connect" : "prepare_cancelled");
+                            Result(transaction, target, state, message, diagnosticCode);
                             ClearClaim();
                         }
                         continue;
@@ -446,7 +447,7 @@ internal static class IdentityWorker
             IdentityFiles.Write(Path.Combine(Root, "status.json"), new {
                 state, target, transaction, message, account, accepts_begin = acceptsBegin, diagnostic_code = diagnosticCode,
                 updated_at = DateTimeOffset.UtcNow, worker_pid = Environment.ProcessId,
-                steam_lifecycle = matchMode ? "match_hold_v2" : "on_demand_v1"
+                steam_lifecycle = matchMode ? "match_hold_v3" : "on_demand_v1"
             });
         }
         catch { } // Never let a full disk disable the browser/native restore watchdog.

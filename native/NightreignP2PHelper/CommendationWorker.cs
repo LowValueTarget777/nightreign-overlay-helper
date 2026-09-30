@@ -12,7 +12,7 @@ internal static class CommendationWorker
         Console.Out.Flush();
     }
 
-    internal static int Run(bool checkOnly = false)
+    internal static int Run(bool checkOnly = false, bool inspectOnly = false)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -30,6 +30,23 @@ internal static class CommendationWorker
             var account = SteamUser.GetSteamID().ToString();
             if (account == request.Target || (!string.IsNullOrEmpty(request.ExpectedAccount) && request.ExpectedAccount != account))
             { Reply("error", "Steam 账号已切换或目标为自己，请重新确认队友", account); return 1; }
+            if (inspectOnly)
+            {
+                using var check = new IdentityHtmlSession(account, request.Target, () => { });
+                try
+                {
+                    var inspectedPage = check.Inspect();
+                    Console.WriteLine(JsonSerializer.Serialize(new { state = "inspected", correct_account = inspectedPage.CorrectAccount,
+                        can_block = inspectedPage.CanBlock, can_unblock = inspectedPage.CanUnblock, comments_ready = check.CommentsReady,
+                        probes = check.InspectionProbes, replies = check.InspectionReplies }, IdentityFiles.Json));
+                }
+                catch (TimeoutException)
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(new { state = "page_timeout",
+                        probes = check.InspectionProbes, replies = check.InspectionReplies, page = check.InspectionState }, IdentityFiles.Json));
+                }
+                return 0;
+            }
             if (checkOnly)
             {
                 using var check = new IdentityHtmlSession(account, request.Target, () => { });

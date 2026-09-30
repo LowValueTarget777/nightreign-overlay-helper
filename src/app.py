@@ -12,6 +12,7 @@ from src.ui.overlay import OverlayWidget
 from src.ui.map_overlay import MapOverlayWidget
 from src.ui.hp_overlay import HpOverlayWidget
 from src.ui.p2p_overlay import P2POverlayUIState, P2POverlayWidget
+from src.ui.commendation_overlay import CommendationOverlayWidget
 from src.ui.settings import SettingsWindow
 from src.ui.admin_prompt import show_admin_prompt
 from src.p2p import P2PService, SteamPlaytimeService
@@ -74,6 +75,7 @@ if __name__ == "__main__":
     map_overlay = MapOverlayWidget()
     hp_overlay = HpOverlayWidget()
     p2p_overlay = P2POverlayWidget()
+    commend_overlay = CommendationOverlayWidget()
     p2p_service = P2PService()
     playtime_service = SteamPlaytimeService()
     p2p_service.status_changed.connect(p2p_overlay.set_status)
@@ -89,11 +91,13 @@ if __name__ == "__main__":
     p2p_service.snapshot_received.connect(commendation.set_peers)
     p2p_service.status_changed.connect(commendation.set_status)
     updater.expedition_started.connect(commendation.on_day_one)
-    commendation.rows_changed.connect(p2p_overlay.set_commend_rows)
-    p2p_overlay.commend_requested.connect(commendation.send)
+    commendation.rows_changed.connect(commend_overlay.set_rows)
+    commend_overlay.commend_requested.connect(commendation.send)
+    commend_overlay.dismiss_requested.connect(commendation.dismiss)
     updater.game_foreground_changed.connect(p2p_overlay.set_game_foreground)
+    updater.game_foreground_changed.connect(commend_overlay.set_game_foreground)
     settings_window = SettingsWindow(
-        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service, match_block, commendation
+        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service, match_block, commendation, commend_overlay
     )
     
     # 创建系统托盘图标和菜单
@@ -131,17 +135,20 @@ if __name__ == "__main__":
         overlay.is_menu_opened = True
         map_overlay.is_menu_opened = True
         p2p_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=True))
+        commend_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=True))
         updater.is_menu_opened = True
         # info("Menu opened")
     def on_menu_hide():
         overlay.is_menu_opened = False
         map_overlay.is_menu_opened = False
         p2p_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=False))
+        commend_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=False))
         updater.is_menu_opened = False
         # info("Menu closed")
 
     overlay.right_click_signal.connect(show_menu_at_cursor_pos)
     p2p_overlay.right_click_signal.connect(show_menu_at_cursor_pos)
+    commend_overlay.right_click_signal.connect(show_menu_at_cursor_pos)
     menu.aboutToShow.connect(on_menu_show)
     menu.aboutToHide.connect(on_menu_hide)
 

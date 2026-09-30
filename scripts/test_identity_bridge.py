@@ -113,7 +113,7 @@ class IdentityBridgeTests(unittest.TestCase):
         try:
             bridge.start()
             self.launch.assert_called_once_with(self.helper, 1)
-            for lifecycle in (ipc._STEAM_LIFECYCLE, 'match_hold_v1'):
+            for lifecycle in (ipc._STEAM_LIFECYCLE, 'match_hold_v1', 'match_hold_v2'):
                 ipc._write_json(self.root/'match-1'/'status.json', dict(state='idle', target='', transaction='',
                     message='', accepts_begin=True, updated_at=datetime.now(timezone.utc).isoformat(), steam_lifecycle=lifecycle))
                 bridge._poll()

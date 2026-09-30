@@ -21,11 +21,11 @@ from .service import resolve_helper_path
 _STATES = {"idle", "preparing", "blocked", "restoring", "restored", "recovery_pending", "error"}
 _FINAL = {"restored", "error"}
 _STEAM_LIFECYCLE = "on_demand_v1"
-_MATCH_LIFECYCLE = "match_hold_v2"
+_MATCH_LIFECYCLE = "match_hold_v3"
 _BUSY = {"preparing", "blocked", "restoring", "recovery_pending"}
 _PREPARATION_CODES = {"browser_start", "page_timeout", "page_controls", "page_account",
                       "page_preblocked", "prepare_cancelled", "steam_account", "peer_departed",
-                      "relationship_excluded", "journal_write", "prepare_unknown"}
+                      "relationship_excluded", "journal_write", "prepare_unknown", "steam_connect"}
 
 
 def identity_directory() -> Path:
