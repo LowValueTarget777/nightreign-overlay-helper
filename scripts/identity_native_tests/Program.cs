@@ -23,6 +23,8 @@ internal static class Program
             var loaded = IdentityFiles.Read<IdentityJournal>(args[1]) ?? throw new Exception("missing journal");
             return IdentityRecoveryEngine.Attempt(ref loaded, new FakeChannel(), x => { IdentityFiles.Write(args[1], x); return true; }) ? 0 : 1;
         }
+        if (args.Length == 3 && args[0] == "--supervisor-test-task")
+            return IdentitySupervisorTests.TaskChild(args[1], int.Parse(args[2]));
         Test("restore verifies twice and commits completion", () => {
             var journal = Pending(); var channel = new FakeChannel(); IdentityJournal? saved = null;
             Assert(IdentityRecoveryEngine.Attempt(ref journal, channel, x => { saved = x; return true; }), "not restored");
@@ -109,14 +111,20 @@ internal static class Program
                 () => now < 60000, () => false, () => true, () => true);
             Assert(now == 60000 && renewals == 120, "match hold expired like the old probe");
         });
-        Test("match hold restores on parent death, stop, departure and account offline", () => {
-            foreach (var cause in new[] { "app", "stop", "peer", "account" })
+        Test("match hold restores on parent death, stop, game exit and account offline", () => {
+            foreach (var cause in new[] { "app", "stop", "game", "account" })
             {
                 long now = 0;
-                IdentityRecoveryEngine.HoldMatch(0, () => now, ms => now += ms, () => {},
+                var end = IdentityRecoveryEngine.HoldMatch(0, () => now, ms => now += ms, () => {},
                     () => cause != "app" || now < 1000, () => cause == "stop" && now >= 1000,
-                    () => cause != "peer" || now < 1000, () => cause != "account" || now < 1000);
+                    () => cause != "game" || now < 1000, () => cause != "account" || now < 1000);
                 Assert(now == 1000, "hold outlived " + cause);
+                var expected = cause switch {
+                    "app" => IdentityRecoveryEngine.MatchHoldEnd.LeaseExpired,
+                    "stop" => IdentityRecoveryEngine.MatchHoldEnd.RestoreRequested,
+                    "game" => IdentityRecoveryEngine.MatchHoldEnd.GameExited,
+                    _ => IdentityRecoveryEngine.MatchHoldEnd.AccountOffline };
+                Assert(end == expected, "wrong end reason " + cause);
             }
         });
         Test("match hold has independent four-hour ceiling", () => {
@@ -145,6 +153,8 @@ internal static class Program
             finally { Directory.Delete(root, recursive: true); }
         });
         IdentitySessionTests.Run(Test);
+        IdentityHandoffTests.Run(Test);
+        IdentitySupervisorTests.Run(Test);
         IdentityPreparationTests.Run(Test);
         CommendationTests.Run(Test);
         Console.WriteLine($"{passed} offline recovery/lifecycle tests passed; no Steam calls.");

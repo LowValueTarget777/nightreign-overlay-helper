@@ -14,14 +14,20 @@ internal interface IIdentityRecoveryChannel
 
 internal static class IdentityRecoveryEngine
 {
-    internal static void HoldMatch(long started, Func<long> now, Action<int> pump, Action renew,
-        Func<bool> authorized, Func<bool> restoreRequested, Func<bool> peerActive, Func<bool> accountOnline)
+    internal enum MatchHoldEnd { LeaseExpired, RestoreRequested, GameExited, AccountOffline, Deadline }
+    internal static MatchHoldEnd HoldMatch(long started, Func<long> now, Action<int> pump, Action renew,
+        Func<bool> authorized, Func<bool> restoreRequested, Func<bool> gameRunning, Func<bool> accountOnline)
     {
-        // The independent owner restores on lost lease, disconnect, game exit,
-        // account change or a four-hour ceiling, regardless of the UI timer.
-        while (now() - started < 4 * 60 * 60 * 1000 && authorized()
-            && !restoreRequested() && peerActive() && accountOnline())
+        // Transient Steam P2P states cannot prove departure. The UI confirms
+        // fresh sustained absence and explicitly requests restoration; the
+        // independent owner still handles game/app/account exit and its ceiling.
+        while (true)
         {
+            if (now() - started >= 4 * 60 * 60 * 1000) return MatchHoldEnd.Deadline;
+            if (!authorized()) return MatchHoldEnd.LeaseExpired;
+            if (restoreRequested()) return MatchHoldEnd.RestoreRequested;
+            if (!gameRunning()) return MatchHoldEnd.GameExited;
+            if (!accountOnline()) return MatchHoldEnd.AccountOffline;
             renew();
             pump(500);
         }

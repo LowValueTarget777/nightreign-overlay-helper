@@ -32,6 +32,7 @@ class P2PStatus:
             "helper_started",
             "helper_restarting",
             "waiting_for_game",
+            "game_exited",
         }
 
 

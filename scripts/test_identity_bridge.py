@@ -113,7 +113,7 @@ class IdentityBridgeTests(unittest.TestCase):
         try:
             bridge.start()
             self.launch.assert_called_once_with(self.helper, 1)
-            for lifecycle in (ipc._STEAM_LIFECYCLE, 'match_hold_v1', 'match_hold_v2'):
+            for lifecycle in (ipc._STEAM_LIFECYCLE, 'match_hold_v1', 'match_hold_v2', 'match_hold_v3', 'on_demand_v1'):
                 ipc._write_json(self.root/'match-1'/'status.json', dict(state='idle', target='', transaction='',
                     message='', accepts_begin=True, updated_at=datetime.now(timezone.utc).isoformat(), steam_lifecycle=lifecycle))
                 bridge._poll()
@@ -246,6 +246,54 @@ class IdentityBridgeTests(unittest.TestCase):
         self.assertFalse(self.bridge.status["accepts_begin"])
         self.assertFalse(self.bridge.begin("76561198049468923"))
 
+    def test_blocked_worker_missing_heartbeat_keeps_verified_lease_for_thirty_seconds(self):
+        transaction = self.begin()
+        self.bridge.authorize_hold('76561198049468923')
+        self.status('blocked', transaction)
+        self.bridge._poll()
+        lease = self.root / 'clients' / (self.bridge._client + '.json')
+        for missing in (False, True):
+            if missing:
+                (self.root / 'status.json').unlink()
+            else:
+                self.status('blocked', transaction, age=12)
+            self.bridge._last_lease -= 2
+            self.bridge._poll()
+            self.assertEqual(ipc._read_json(lease)['hold_target'], '76561198049468923')
+            self.assertEqual(self.bridge.status['state'], 'blocked')
+            self.assertFalse(self.bridge.status['accepts_begin'])
+            self.assertEqual(self.bridge._poll_reason, 'worker_outage_grace')
+            self.launch.assert_not_called()
+        self.bridge._last_compatible_seen -= 31
+        self.bridge._poll()
+        self.assertFalse(lease.exists())
+        self.launch.assert_called_once_with(self.helper)
+
+    def test_fresh_old_worker_revokes_grace_without_touching_its_journal(self):
+        transaction = self.begin()
+        self.status('blocked', transaction)
+        self.bridge._poll()
+        self.status('blocked', transaction, lifecycle='on_demand_v1')
+        self.bridge._poll()
+        self.assertFalse((self.root / 'clients' / (self.bridge._client + '.json')).exists())
+        self.assertEqual(self.bridge._poll_reason, 'old_lifecycle')
+        self.assertFalse(self.bridge.begin('76561198049468924'))
+
+    def test_completed_worker_exit_consumes_result_then_starts_clean_idle_process(self):
+        transaction = self.begin()
+        self.status('restored', transaction, worker_exiting=True)
+        ipc._write_json(self.root/'results'/f'{transaction}.json', dict(state='restored',
+            target='76561198049468923', transaction=transaction, message='restored'))
+        self.bridge._poll()
+        self.assertFalse(self.bridge.pending)
+        self.assertTrue(any(e['state'] == 'restored' for e in self.events))
+        self.assertFalse((self.root / 'clients' / (self.bridge._client + '.json')).exists())
+        self.launch.assert_called_once_with(self.helper)
+        self.assertFalse(self.bridge.status['accepts_begin'])
+        self.status()
+        self.bridge._poll()
+        self.assertTrue(self.bridge.begin('76561198049468924'))
+
     def test_unknown_lifecycle_marker_is_not_accepted(self):
         self.status(lifecycle="different-contract")
         self.bridge.start()
@@ -372,6 +420,7 @@ class IdentityBridgeTests(unittest.TestCase):
     def test_worker_restart_retains_pending_transaction(self):
         transaction = self.begin()
         self.status("blocked", transaction, age=30)
+        self.bridge._last_compatible_seen -= 31
         self.bridge._poll()
         self.launch.assert_called_once()
         self.assertEqual(self.bridge._pending, transaction)

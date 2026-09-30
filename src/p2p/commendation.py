@@ -99,7 +99,7 @@ class CommendationService(QObject):
         if status.state != 'steam_ready':
             self.last_snapshot = float('-inf')
             self.departures.clear()
-        if status.state == 'waiting_for_game' and self.roster:
+        if status.state == 'game_exited' and self.roster:
             self.finish_match()
 
     def on_day_one(self, detected_at):

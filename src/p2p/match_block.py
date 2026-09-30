@@ -11,6 +11,8 @@ from src.logger import info
 from .identity_bridge import IdentityBridge
 
 _RETRYABLE_PREPARATION = {'browser_start', 'page_timeout', 'page_controls', 'steam_connect', 'prepare_cancelled'}
+DEPARTURE_SECONDS = 10
+SNAPSHOT_GRACE_SECONDS = 30
 
 class MatchBlockController(QObject):
     status_changed = pyqtSignal(str)
@@ -24,6 +26,9 @@ class MatchBlockController(QObject):
         self.enabled = False
         self.peers = {}
         self.last_snapshot = float('-inf')
+        self.snapshot_valid = False
+        self.game_stopped = False
+        self.missing_since = {}
         self.attempted = set()
         self.assigned = {}
         self.departed = set()
@@ -64,7 +69,16 @@ class MatchBlockController(QObject):
         """Fresh complete native snapshots, including unchanged/empty lists."""
         now = self.clock()
         incoming = {p.steam_id: p for p in peers}
-        self.departed.update(set(self.assigned.values()) - set(incoming))
+        if not self.snapshot_valid or not 0 <= now - self.last_snapshot <= 5:
+            # A resumed Qt event loop may receive this snapshot before the
+            # stale-data timer runs. The unseen gap cannot confirm departure.
+            self.missing_since.clear()
+        for target in self.assigned.values():
+            peer = incoming.get(target)
+            if peer is not None and peer.state in {'connected', 'connecting'}:
+                self.missing_since.pop(target, None)
+            else:
+                self.missing_since.setdefault(target, now)
         # A failed/completed attempt stays suppressed for this continuous presence.
         # Departure permits a new attempt on a future encounter, after recovery.
         self.attempted.intersection_update(set(incoming) | set(self.assigned.values()))
@@ -73,12 +87,20 @@ class MatchBlockController(QObject):
             self.retry_count.pop(target, None)
         self.peers = incoming
         self.last_snapshot = now
+        self.snapshot_valid = True
+        self.game_stopped = False
         self.tick()
 
     def set_status(self, status):
+        if status.state == 'steam_ready':
+            self.game_stopped = False
         if status.state != "steam_ready":
-            # Only a fresh snapshot may renew a hold after helper errors.
-            self.last_snapshot = float('-inf')
+            # Stop new blocks immediately, but a brief helper outage is not
+            # proof that an already blocked teammate has left the expedition.
+            self.snapshot_valid = False
+            self.missing_since.clear()
+            if status.state in {'game_exited', 'disabled'}:
+                self.game_stopped = True
             self.tick()
 
     def _message(self, value):
@@ -99,7 +121,9 @@ class MatchBlockController(QObject):
 
     def _tick(self):
         now = self.clock()
-        fresh = 0 <= now - self.last_snapshot <= 5
+        fresh = self.snapshot_valid and 0 <= now - self.last_snapshot <= 5
+        if not fresh:
+            self.missing_since.clear()
         for index, target in list(self.assigned.items()):
             bridge = self.bridges[index]
             # Release completed slots before considering departure. Otherwise a
@@ -118,14 +142,32 @@ class MatchBlockController(QObject):
                     self.retry_at[target] = now + min(180, 30 * (2 ** min(count-1, 3)))
                     info(f"Match name: preparation retry scheduled slot={index} attempt={count} reason={bridge.status.get('diagnostic_code')}")
                 self.departed.discard(target)
+                self.missing_since.pop(target, None)
                 info(f"Match name: slot released slot={index} state={bridge.status.get('state')}")
                 continue
             peer = self.peers.get(target)
-            # Steam may report Ignored/Blocked after our block; that isn't a
-            # reason to treat a still-connected teammate as a newly found friend.
-            keep = (self.enabled and fresh and peer is not None and peer.state == 'connected'
-                    and peer.relationship != 3 and target not in self.departed)
+            reason = ''
+            if not self.enabled:
+                reason = 'disabled'
+            elif self.game_stopped:
+                reason = 'game_stopped'
+            elif target in self.departed:
+                reason = 'peer_departed'
+            elif peer is not None and peer.relationship in {3, 6}:
+                reason = 'became_friend'
+            elif fresh:
+                if peer is None or peer.state not in {'connected', 'connecting'}:
+                    since = self.missing_since.setdefault(target, now)
+                    if self.last_snapshot - since >= DEPARTURE_SECONDS:
+                        self.departed.add(target)
+                        reason = 'peer_departed'
+            elif now - self.last_snapshot >= SNAPSHOT_GRACE_SECONDS:
+                reason = 'snapshot_timeout'
+            # A transient empty list, reconnecting session or missing Ping is
+            # allowed for existing holds. New blocks still require fresh Ping.
+            keep = not reason
             if not keep and bridge.status.get("state") not in {"restoring", "recovery_pending"}:
+                info(f"Match name: restore requested slot={index} reason={reason}")
                 bridge.restore()
             bridge.authorize_hold(target if keep and bridge.status.get("state") in {"preparing", "blocked"} else "")
 

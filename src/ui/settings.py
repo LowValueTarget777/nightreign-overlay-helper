@@ -586,7 +586,7 @@ class SettingsWindow(QWidget):
         self.match_block_checkbox.setChecked(False)
         self.match_block_checkbox.stateChanged.connect(self.update_match_block_enabled)
         layout.addWidget(self.match_block_checkbox)
-        hint = QLabel("好友一律跳过；非好友连接正常且有有效 Ping 即可尝试，无需等待 DAY1。网页准备超时后自动等待重试；离队、关闭开关或退出助手后解除。断网时保留恢复记录。")
+        hint = QLabel("好友一律跳过；非好友连接正常且有有效 Ping 即可尝试，无需等待 DAY1。网页准备超时后自动等待重试；持续确认离队 10 秒后解除，短暂重连不解除。关闭开关、退出助手或游戏后请求恢复；断网时保留记录继续重试。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray;")
         layout.addWidget(hint)

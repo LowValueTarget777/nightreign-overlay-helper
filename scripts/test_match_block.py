@@ -64,6 +64,10 @@ class MatchPolicyTests(unittest.TestCase):
         self.feed(peers)
         self.feed(peers, 6)
 
+    def continuous(self, players, seconds=10):
+        for _ in range(seconds):
+            self.feed(players)
+
     def test_ping_ready_peer_starts_without_day1(self):
         self.feed([peer()])
         self.assertEqual(self.bridges[0].begins, [peer().steam_id])
@@ -113,6 +117,40 @@ class MatchPolicyTests(unittest.TestCase):
                 self.assertEqual(len(pending), 1)
                 self.assertNotEqual(pending[0], first)
                 self.assertEqual(len(controller.assigned), 1, 'reentrant preparation assigned target twice')
+            finally:
+                controller.stop()
+
+    def test_transient_real_lease_write_failure_does_not_revoke_blocked_target(self):
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from src.p2p import identity_bridge as ipc
+        with TemporaryDirectory() as directory, patch.object(ipc, 'identity_directory', return_value=Path(directory)), patch.object(ipc, '_launch_worker'):
+            bridges = [ipc.IdentityBridge(slot=i) for i in (0, 1)]
+            controller = MatchBlockController(bridges=bridges, legacy=Bridge(), clock=lambda: self.now)
+            try:
+                for bridge in bridges:
+                    ipc._write_json(bridge._root/'status.json', dict(state='idle', message='test', accepts_begin=True,
+                        steam_lifecycle=ipc._MATCH_LIFECYCLE, updated_at=datetime.now(timezone.utc).isoformat()))
+                    bridge.start(); bridge._timer.stop()
+                controller.set_enabled(True)
+                controller.set_peers([peer()])
+                bridge = bridges[0]
+                transaction = bridge._pending
+                ipc._write_json(bridge._root/'status.json', dict(state='blocked', message='test', accepts_begin=False,
+                    target=peer().steam_id, transaction=transaction, steam_lifecycle=ipc._MATCH_LIFECYCLE,
+                    updated_at=datetime.now(timezone.utc).isoformat()))
+                bridge._poll()
+                bridge._last_lease -= 2
+                with patch.object(ipc, '_write_json', side_effect=OSError('temporarily locked')):
+                    bridge._poll()
+                self.assertEqual(bridge.status['state'], 'blocked')
+                self.assertEqual(bridge.hold_target, peer().steam_id)
+                self.assertEqual(bridge._poll_reason, 'lease_write_grace')
+                bridge._poll()
+                lease = ipc._read_json(bridge._root/'clients'/(bridge._client+'.json'))
+                self.assertEqual(lease['hold_target'], peer().steam_id)
+                self.assertFalse((bridge._root/f'restore-{transaction}.json').exists())
             finally:
                 controller.stop()
 
@@ -186,6 +224,9 @@ class MatchPolicyTests(unittest.TestCase):
                     for bridge, transaction, player in zip(bridges, transactions, players):
                         status(bridge, 'blocked', transaction, player.steam_id)
                     controller.set_peers([])
+                    for _ in range(10):
+                        self.now += 1
+                        controller.set_peers([])
                     for bridge, transaction, player in zip(bridges, transactions, players):
                         self.assertTrue((bridge._root/f'restore-{transaction}.json').exists())
                         # Native completion removes the restore marker, retains
@@ -222,6 +263,7 @@ class MatchPolicyTests(unittest.TestCase):
         self.feed([peer(1, 5), peer(2, 5)])
         self.assertEqual(len(self.controller.assigned), 2)
         self.feed([peer(1, 5)])
+        self.continuous([peer(1, 5)])
         self.assertEqual([b.restores for b in self.bridges], [0, 1])
 
     def test_friend_unknown_and_preblocked_are_excluded(self):
@@ -239,6 +281,7 @@ class MatchPolicyTests(unittest.TestCase):
     def test_departed_peer_only_is_restored(self):
         self.opening([peer(1), peer(2)])
         self.feed([peer(2)])
+        self.continuous([peer(2)])
         self.assertEqual([b.restores for b in self.bridges], [1, 0])
         self.assertEqual(self.bridges[0].hold_target, '')
 
@@ -249,17 +292,65 @@ class MatchPolicyTests(unittest.TestCase):
         self.assertEqual(self.bridges[0].restores, 0)
         self.assertEqual(self.bridges[0].begins, [peer().steam_id])
 
-    def test_stale_snapshot_restores_even_if_process_still_alive(self):
+    def test_stale_snapshot_holds_for_grace_then_restores(self):
         self.opening([peer()])
         self.now += 6
         self.controller.tick()
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.now += 24
+        self.controller.tick()
         self.assertEqual(self.bridges[0].restores, 1)
 
-    def test_helper_failure_restores_and_invalidates_snapshot(self):
+    def test_helper_failure_stops_new_block_but_preserves_existing_hold(self):
         self.opening([peer()])
+        last = self.controller.last_snapshot
         self.controller.set_status(NS(state='runtime_error'))
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.assertFalse(self.controller.snapshot_valid)
+        self.assertEqual(self.controller.last_snapshot, last)
+        self.now += 15
+        self.controller.tick()
+        self.assertEqual(self.bridges[0].hold_target, peer().steam_id)
+        self.feed([peer(1, 5)])
+        self.assertEqual(self.bridges[0].restores, 0)
+
+    def test_brief_empty_reconnection_and_missing_ping_do_not_restore(self):
+        from dataclasses import replace
+        self.opening([peer()])
+        self.feed([])
+        self.feed([], 8)
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.feed([replace(peer(1, 5), state='connecting', ping_ms=None)])
+        self.feed([replace(peer(1, 5), state='connecting', ping_ms=None)], 15)
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.assertEqual(len(self.bridges[0].begins), 1)
+
+    def test_departure_needs_continuous_fresh_absence_and_restarts_after_gap(self):
+        self.opening([peer()])
+        self.feed([])
+        self.now += 8
+        self.controller.tick()
+        self.feed([])
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.continuous([])
         self.assertEqual(self.bridges[0].restores, 1)
-        self.assertEqual(self.controller.last_snapshot, float("-inf"))
+
+    def test_snapshot_gap_before_stale_timer_cannot_confirm_departure(self):
+        self.opening([peer()])
+        self.feed([])
+        # No tick during the gap: simulate the Qt GUI event loop being paused.
+        self.feed([], 10)
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.continuous([])
+        self.assertEqual(self.bridges[0].restores, 1)
+
+    def test_helper_restart_waiting_state_is_not_real_game_exit(self):
+        self.opening([peer()])
+        for state in ('helper_restarting', 'helper_started', 'waiting_for_game'):
+            self.controller.set_status(NS(state=state))
+        self.assertEqual(self.bridges[0].restores, 0)
+        self.controller.set_status(NS(state='game_exited'))
+        self.assertEqual(self.bridges[0].restores, 1)
 
     def test_disabled_waits_and_enabling_midgame_processes_fresh_peers(self):
         self.controller.set_enabled(False)
@@ -288,6 +379,7 @@ class MatchPolicyTests(unittest.TestCase):
     def test_returning_same_peer_can_start_after_departure_recovery_finishes(self):
         self.feed([peer()])
         self.feed([])
+        self.continuous([])
         self.feed([peer()])
         self.assertEqual(len(self.bridges[0].begins), 1)
         self.bridges[0]._pending = None

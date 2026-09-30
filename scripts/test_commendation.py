@@ -106,6 +106,13 @@ class CommendationTests(unittest.TestCase):
         self.feed([replace(p, state='connecting') for p in peers()])
         self.feed([replace(p, state='connecting') for p in peers()], 10)
         self.assertFalse(self.rows)
+
+    def test_helper_restart_waiting_does_not_finish_but_game_exit_does(self):
+        self.start()
+        self.service.set_status(P2PStatus('waiting_for_game', 'starting helper'))
+        self.assertFalse(self.rows)
+        self.service.set_status(P2PStatus('game_exited', 'game closed'))
+        self.assertEqual(len(self.rows), 2)
     def test_manual_finish_supports_staying_in_room_and_restart_keeps_names(self):
         self.feed(peers())
         self.service.finish_match()

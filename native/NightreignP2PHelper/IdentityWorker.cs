@@ -14,12 +14,16 @@ internal static class IdentityWorker
     private static long lastHeartbeat;
     private static readonly Stopwatch Clock = Stopwatch.StartNew();
     private static string state = "preparing", message = "正在检查通信恢复记录", account = "", target = "", transaction = "";
-    private static bool acceptsBegin;
+    private static bool workerExiting;
+    private static bool workerStarted;
+    private static int supervisorPid;
+    private static string holdEndReason = "";
     private static string diagnosticCode = "";
-    private static DateTimeOffset lastClient = DateTimeOffset.UtcNow;
 
-    internal static int Run(int? matchSlot = null)
+    internal static int Run(int? matchSlot = null, int? supervisorPid = null)
     {
+        workerStarted = true;
+        IdentityWorker.supervisorPid = supervisorPid ?? Environment.ProcessId;
         if (matchSlot is not null)
         {
             if (matchSlot is not (0 or 1)) return 2;
@@ -30,9 +34,8 @@ internal static class IdentityWorker
         Directory.CreateDirectory(Path.Combine(Root, "requests"));
         Directory.CreateDirectory(Path.Combine(Root, "clients"));
         Directory.CreateDirectory(Path.Combine(Root, "results"));
-        FileStream singleton;
-        try { singleton = new FileStream(Path.Combine(Root, "worker.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-        catch (IOException) { return 0; }
+        var singleton = IdentityRecoveryHandoff.TakeWorkerLock(Root, waitMs: supervisorPid is null ? 0 : 10_000);
+        if (singleton is null) return 0;
         using (singleton)
         {
             // Deliberately no parent process, console-input or game-exit cancellation.
@@ -48,29 +51,29 @@ internal static class IdentityWorker
                     if (unreadable)
                     {
                         Set("recovery_pending", "恢复记录损坏，已停止自动操作；请在 Steam 核对屏蔽列表");
-                        Sleep(5000); continue;
+                        return FinishWorker();
                     }
                     RecoverAbandonedClaim(journals);
                     if (journals.Count > 0)
                     {
                         target = journals[0].Target; transaction = journals[0].Transaction;
-                        var result = IdentitySessionCoordinator.Run(null, true, InspectRequest, Connect, () =>
+                        var result = IdentitySessionCoordinator.RunRecoveryAttempt(Connect, () =>
                         {
                             account = SteamUser.GetSteamID().ToString();
                             var pending = journals.FirstOrDefault(x => x.Account == account);
                             if (pending is null)
                             {
                                 Set("recovery_pending", "请登录原 Steam 账号以恢复上次暂时屏蔽的队友");
-                                return;
+                                return false;
                             }
                             using var accountLock = LockAccount(account);
                             using var targetLock = LockTarget(account, pending.Target);
-                            Recover(pending, null);
+                            return Recover(pending, null);
                         }, Disconnect);
                         if (result == IdentitySessionResult.Unavailable)
                             Set("recovery_pending", "通信恢复等待 Steam 登录和联网；请勿删除恢复记录");
-                        if (state != "restored") Sleep(5000);
-                        continue;
+                        if (NoPendingRecovery()) return FinishWorker();
+                        return FinishForRetry();
                     }
                     // File IPC and request validation do not require a Steam
                     // session. Idle workers must never register the game as running.
@@ -94,20 +97,19 @@ internal static class IdentityWorker
                             Result(transaction, target, state, message, diagnosticCode);
                             ClearClaim();
                         }
-                        continue;
+                        if (NoPendingRecovery()) return FinishWorker();
+                        return FinishForRetry();
                     }
                     if (state != "restored")
                     { target = ""; transaction = ""; Set("idle", "队友身份识别已就绪（按需连接 Steam）", true); }
-                    else acceptsBegin = true;
-                    if (NoClientsFor(60)) return 0;
-                    Sleep(150);
+                    return FinishWorker();
                   }
                   catch
                   {
                       // A transient filesystem/Steam error must not kill the detached
                       // recovery owner. The last durable journal remains authoritative.
                       Set("recovery_pending", "识别组件正在重连；通信恢复记录已保留");
-                      Thread.Sleep(5000);
+                      return FinishForRetry();
                   }
                 }
             }
@@ -117,6 +119,30 @@ internal static class IdentityWorker
                 if (library != 0) NativeLibrary.Free(library);
             }
         }
+    }
+
+    private static bool NoPendingRecovery()
+        => ReadPending(out var unreadable).Count == 0 && !unreadable;
+
+    private static int FinishWorker()
+    {
+        // Some Steam clients retain the AppID process registration after SDK
+        // Shutdown. A Steam task's owner therefore exits instead of idling.
+        workerExiting = true; Tick(true);
+        return 0;
+    }
+
+    private static int FinishForRetry()
+    {
+        try
+        {
+            IdentityRecoveryHandoff.Schedule(Root, DateTimeOffset.UtcNow, () => { });
+        }
+        catch
+        {
+            Set("recovery_pending", "无法写入重试时间；独立监督组件仍会重试，恢复记录已保留");
+        }
+        return FinishWorker();
     }
 
     private static FileStream LockAccount(string id) => new(Path.Combine(Root, "account-" + id + ".lock"),
@@ -170,7 +196,7 @@ internal static class IdentityWorker
     private static bool ClientAlive(string id)
     {
         var path = Path.Combine(Root, "clients", id + ".json");
-        return File.Exists(path) && DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5);
+        return File.Exists(path) && IdentityRecoveryHandoff.FreshClient(File.GetLastWriteTimeUtc(path), DateTimeOffset.UtcNow);
     }
     private static IdentityRequestEnvironment InspectRequest(IdentityRequest request)
         => new(DateTimeOffset.UtcNow, ClientAlive(request.Client), RequestedRestore(request.Transaction), GameRunning());
@@ -198,12 +224,6 @@ internal static class IdentityWorker
         catch { return false; }
         finally { foreach (var game in games) game.Dispose(); }
     }
-    private static bool NoClientsFor(int seconds)
-    {
-        if (Directory.EnumerateFiles(Path.Combine(Root, "clients"), "*.json")
-            .Any(p => DateTime.UtcNow - File.GetLastWriteTimeUtc(p) < TimeSpan.FromSeconds(5))) lastClient = DateTimeOffset.UtcNow;
-        return DateTimeOffset.UtcNow - lastClient > TimeSpan.FromSeconds(seconds);
-    }
     private static bool RequestedRestore(string id) => File.Exists(Path.Combine(Root, "restore-" + id + ".json"));
     private static void RecoverAbandonedClaim(List<IdentityJournal> pending)
     {
@@ -229,6 +249,7 @@ internal static class IdentityWorker
     {
         using var targetLock = LockTarget(account, request.Target);
         target = request.Target; transaction = request.Transaction;
+        holdEndReason = "";
         Set("preparing", "正在确认队友和原始通信状态");
         IdentityJournal? journal = null;
         IdentityHtmlSession? html = null;
@@ -276,7 +297,7 @@ internal static class IdentityWorker
             Save(prepared); // Failure here forbids sending block=1.
             journal = prepared; // Only now is there a transaction requiring compensation.
             var started = Clock.ElapsedMilliseconds;
-            html.StartBlock(matchMode ? 30000 : 9000);
+            html.StartBlock(matchMode ? IdentityRecoveryHandoff.BrowserWatchdogMs : 9000);
             var blockReply = html.WaitBlock(2000);
             journal = journal with { BlockSettled = html.BlockSettled }; TrySave(journal);
             if (blockReply?.Tag == "precondition")
@@ -297,10 +318,19 @@ internal static class IdentityWorker
                 journal = journal with { BlockObserved = true }; TrySave(journal);
                 Set("blocked", matchMode ? "已暂时屏蔽非好友队友；离队或关闭开关后恢复" : "正在对应队友栏，随后自动恢复通信");
                 if (matchMode)
-                    IdentityRecoveryEngine.HoldMatch(started, () => Clock.ElapsedMilliseconds,
+                {
+                    var end = IdentityRecoveryEngine.HoldMatch(started, () => Clock.ElapsedMilliseconds,
                         html.Wait, html.RenewHold, () => HoldAuthorized(request),
-                        () => RequestedRestore(transaction), () => GameRunning() && ActivePeer(target),
+                        () => RequestedRestore(transaction), GameRunning,
                         () => SteamUser.BLoggedOn() && SteamUser.GetSteamID().ToString() == account);
+                    holdEndReason = end switch {
+                        IdentityRecoveryEngine.MatchHoldEnd.LeaseExpired => "client_lease_expired",
+                        IdentityRecoveryEngine.MatchHoldEnd.RestoreRequested => "restore_requested",
+                        IdentityRecoveryEngine.MatchHoldEnd.GameExited => "game_exited",
+                        IdentityRecoveryEngine.MatchHoldEnd.AccountOffline => "account_offline",
+                        _ => "four_hour_limit" };
+                    Tick(true);
+                }
                 else
                     IdentityRecoveryEngine.Hold(started, () => Clock.ElapsedMilliseconds, html.Wait,
                         () => ClientAlive(request.Client), () => RequestedRestore(transaction), () => ActivePeer(target));
@@ -333,50 +363,40 @@ internal static class IdentityWorker
         }
     }
 
-    private static void Recover(IdentityJournal journal, IdentityHtmlSession? html)
+    private static bool Recover(IdentityJournal journal, IdentityHtmlSession? html)
     {
         account = journal.Account; target = journal.Target; transaction = journal.Transaction;
-        int failures = 0;
         try
         {
-            while (true)
+            try
             {
-                try
+                if (!SteamUser.BLoggedOn() || SteamUser.GetSteamID().ToString() != account)
                 {
-                    if (!SteamUser.BLoggedOn() || SteamUser.GetSteamID().ToString() != account)
-                    {
-                        Set("recovery_pending", "恢复等待原 Steam 账号在线；恢复记录会保留");
-                        return;
-                    }
-                    html ??= new IdentityHtmlSession(account, target, Tick);
-                    Set("restoring", "正在恢复队友通信");
-                    if (IdentityRecoveryEngine.Attempt(ref journal, new RecoveryChannel(html, account, target), TrySave))
-                    {
-                        Set("restored", "队友通信已恢复", true);
-                        Result(transaction, target, state, message);
-                        ClearClaim();
-                        var restore = Path.Combine(Root, "restore-" + transaction + ".json");
-                        if (File.Exists(restore)) File.Delete(restore);
-                        return;
-                    }
-                    Set("recovery_pending", !journal.BlockSettled && !journal.BlockObserved
-                        ? "原屏蔽请求结果未明；正在持续尝试恢复，请在 Steam 核对该队友"
-                        : "通信恢复尚未确认；保持 Steam 在线后将继续重试");
-                    // A fetch may remain unresolved without throwing while the
-                    // verifier still works. Do not reuse that stuck action queue
-                    // forever: a fresh surface can send compensation independently.
-                    if (++failures >= 3) { html.Dispose(); html = null; failures = 0; }
+                    Set("recovery_pending", "恢复等待原 Steam 账号在线；恢复记录会保留");
+                    return false;
                 }
-                catch
+                html ??= new IdentityHtmlSession(account, target, Tick);
+                Set("restoring", "正在恢复队友通信");
+                if (IdentityRecoveryEngine.Attempt(ref journal, new RecoveryChannel(html, account, target), TrySave))
                 {
-                    Set("recovery_pending", "暂时无法核对通信恢复；保持 Steam 在线，将自动重试");
-                    // A replacement browser uses fresh login state. The journal stays
-                    // uncertain if disposing aborted a still-in-flight request.
-                    if (++failures >= 3) { html?.Dispose(); html = null; failures = 0; }
+                    Set("restored", "队友通信已恢复", true);
+                    Result(transaction, target, state, message);
+                    ClearClaim();
+                    var restore = Path.Combine(Root, "restore-" + transaction + ".json");
+                    if (File.Exists(restore)) File.Delete(restore);
+                    return true;
                 }
-                // Low-frequency retries continue independently of the UI's lifetime.
-                if (html is not null) html.Wait(15000); else Sleep(15000);
+                Set("recovery_pending", !journal.BlockSettled && !journal.BlockObserved
+                    ? "原屏蔽请求结果未明；正在持续尝试恢复，请在 Steam 核对该队友"
+                    : "通信恢复尚未确认；保持 Steam 在线后将继续重试");
             }
+            catch
+            {
+                Set("recovery_pending", "暂时无法核对通信恢复；保持 Steam 在线，将自动重试");
+            }
+            // Unknown replies retain the journal. The finite attempt's process
+            // can now exit; its successor resumes compensation after local delay.
+            return false;
         }
         finally { html?.Dispose(); }
     }
@@ -428,15 +448,20 @@ internal static class IdentityWorker
         }
         catch { return false; }
     }
-    internal static void Disconnect() => IdentitySessionCoordinator.Release(ref steamReady, SteamAPI.Shutdown);
+    internal static void Disconnect()
+    {
+        try { IdentitySessionCoordinator.Release(ref steamReady, SteamAPI.Shutdown); }
+        finally { if (workerStarted) Tick(true); }
+    }
     private static void Result(string id, string peer, string resultState, string resultMessage, string code = "")
     {
         try { IdentityFiles.Write(Path.Combine(Root, "results", id + ".json"),
-            new { state = resultState, target = peer, transaction = id, message = resultMessage, diagnostic_code = code }); }
+            new { state = resultState, target = peer, transaction = id, message = resultMessage,
+                diagnostic_code = code, hold_end_reason = holdEndReason }); }
         catch { } // The durable journal, rather than UI telemetry, owns recovery.
     }
     private static void Set(string next, string detail, bool canBegin = false, string code = "")
-    { state = next; message = detail; acceptsBegin = canBegin; diagnosticCode = code; Tick(true); }
+    { state = next; message = detail; diagnosticCode = code; Tick(true); }
     private static void Tick() => Tick(false);
     private static void Tick(bool force)
     {
@@ -445,9 +470,11 @@ internal static class IdentityWorker
         try
         {
             IdentityFiles.Write(Path.Combine(Root, "status.json"), new {
-                state, target, transaction, message, account, accepts_begin = acceptsBegin, diagnostic_code = diagnosticCode,
-                updated_at = DateTimeOffset.UtcNow, worker_pid = Environment.ProcessId,
-                steam_lifecycle = matchMode ? "match_hold_v3" : "on_demand_v1"
+                state, target, transaction, message, account, accepts_begin = false, diagnostic_code = diagnosticCode,
+                updated_at = DateTimeOffset.UtcNow, worker_pid = supervisorPid,
+                task_pid = Environment.ProcessId, task_exiting = workerExiting,
+                steam_connected = steamReady, worker_exiting = false, hold_end_reason = holdEndReason,
+                steam_lifecycle = matchMode ? "match_hold_v4" : "on_demand_v2"
             });
         }
         catch { } // Never let a full disk disable the browser/native restore watchdog.

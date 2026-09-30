@@ -132,7 +132,7 @@ class EncounterService(QObject):
     def set_status(self, status):
         if status.state != 'steam_ready':
             self.last_snapshot = float('-inf')
-        if status.state in {'waiting_for_game', 'disabled'}:
+        if status.state in {'game_exited', 'disabled'}:
             self.round = None
             self.candidates = {}
 

@@ -1,12 +1,13 @@
 namespace NightreignP2PHelper;
 
-internal enum IdentitySessionResult { Idle, Rejected, Unavailable, Completed }
+internal enum IdentitySessionResult { Idle, Rejected, Unavailable, Completed, RecoveryPending }
 
 internal readonly record struct IdentityRequestEnvironment(
     DateTimeOffset Now, bool ClientAlive, bool Cancelled, bool GameRunning);
 
-// This is the production connection boundary. Recovery's entire blocking loop
-// is one work call, so no idle cleanup can destroy its in-flight HTML context.
+// Each bounded recovery attempt owns one Steam session. All its observations
+// finish before shutdown; durable journals, rather than an idle SDK connection,
+// retain compensation ownership between network retries.
 internal static class IdentitySessionCoordinator
 {
     internal static void Release(ref bool initialized, Action shutdown)
@@ -16,6 +17,28 @@ internal static class IdentitySessionCoordinator
         if (!initialized) return;
         try { shutdown(); }
         finally { initialized = false; }
+    }
+
+    internal static void ReleaseResources(IEnumerable<Action> cleanup)
+    {
+        Exception? first = null;
+        foreach (var release in cleanup)
+        {
+            try { release(); }
+            catch (Exception failure) { first ??= failure; }
+        }
+        if (first is not null) throw first;
+    }
+
+    internal static IdentitySessionResult RunRecoveryAttempt(Func<bool> connect,
+        Func<bool> recover, Action disconnect)
+    {
+        try
+        {
+            if (!connect()) return IdentitySessionResult.Unavailable;
+            return recover() ? IdentitySessionResult.Completed : IdentitySessionResult.RecoveryPending;
+        }
+        finally { disconnect(); }
     }
 
     internal static IdentitySessionResult Run(IdentityRequest? request, bool recoveryRequired,

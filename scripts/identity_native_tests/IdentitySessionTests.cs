@@ -123,20 +123,59 @@ internal static class IdentitySessionTests
                 () => releases++);
             Assert(result == IdentitySessionResult.Completed && !journal.RecoveryNeeded && releases == 2, "recovery retry not released");
         });
-        test("in-flight recovery keeps session across failed attempts until completion", () => {
+        test("finite recovery keeps observations together then releases before a new attempt", () => {
             var journal = new IdentityJournal("76561198049468922", "76561198049468923",
-                Guid.NewGuid().ToString("N"), 3, false, false, true, Now);
-            var channel = new RecoveryChannel { BlockSettled = false, RestoreSettled = false };
-            var releases = 0; var connections = 0;
-            IdentitySessionCoordinator.Run(Request(), true, _ => throw new Exception("unexpected preflight"),
+                Guid.NewGuid().ToString("N"), 3, true, true, true, Now);
+            var releases = 0; var connections = 0; var htmlReleased = false;
+            var first = IdentitySessionCoordinator.RunRecoveryAttempt(
                 () => { connections++; return true; }, () => {
-                    Assert(!IdentityRecoveryEngine.Attempt(ref journal, channel, _ => true), "uncertain request completed");
-                    Assert(releases == 0 && journal.RecoveryNeeded, "released unresolved HTML/Steam context");
-                    channel.BlockSettled = true; channel.RestoreSettled = true;
-                    Assert(IdentityRecoveryEngine.Attempt(ref journal, channel, _ => true), "recovery retry failed");
-                    Assert(releases == 0, "shutdown interrupted recovery stack");
-                }, () => releases++);
-            Assert(connections == 1 && releases == 1 && !journal.RecoveryNeeded, "recovery session not scoped to whole task");
+                    try
+                    {
+                        Assert(releases == 0, "shutdown interrupted observations");
+                        return IdentityRecoveryEngine.Attempt(ref journal,
+                            new RecoveryChannel { RestoreSettled = false }, _ => true);
+                    }
+                    finally { htmlReleased = true; }
+                }, () => { Assert(htmlReleased, "SDK released before HTML"); releases++; });
+            Assert(first == IdentitySessionResult.RecoveryPending && releases == 1 && journal.RecoveryNeeded,
+                "failed attempt leaked registration or discarded journal");
+            var second = IdentitySessionCoordinator.RunRecoveryAttempt(
+                () => { connections++; return true; },
+                () => IdentityRecoveryEngine.Attempt(ref journal, new RecoveryChannel(), _ => true), () => releases++);
+            Assert(second == IdentitySessionResult.Completed && connections == 2 && releases == 2
+                && !journal.RecoveryNeeded, "fresh retry did not recover and release");
+        });
+        test("failed recovery login and exceptions release the finite session", () => {
+            var releases = 0;
+            Assert(IdentitySessionCoordinator.RunRecoveryAttempt(() => false,
+                () => throw new Exception("offline mutation"), () => releases++) == IdentitySessionResult.Unavailable,
+                "failed recovery login accepted");
+            foreach (var connectionThrows in new[] { true, false })
+            {
+                try
+                {
+                    IdentitySessionCoordinator.RunRecoveryAttempt(
+                        () => connectionThrows ? throw new IOException() : true,
+                        () => throw new IOException(), () => releases++);
+                    throw new Exception("expected failure");
+                }
+                catch (IOException) { }
+            }
+            Assert(releases == 3, "exception or login failure retained SDK");
+        });
+        test("HTML cleanup failures still release every browser callback and surface", () => {
+            var order = new List<string>();
+            try
+            {
+                IdentitySessionCoordinator.ReleaseResources(new Action[] {
+                    () => { order.Add("browser1"); throw new IOException(); },
+                    () => order.Add("browser2"),
+                    () => { order.Add("callback"); throw new InvalidOperationException(); },
+                    () => order.Add("HTML.Shutdown") });
+                throw new Exception("cleanup failure lost");
+            }
+            catch (IOException) { }
+            Assert(string.Join(",", order) == "browser1,browser2,callback,HTML.Shutdown", "cleanup stopped early");
         });
     }
 

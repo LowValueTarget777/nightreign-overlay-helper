@@ -196,7 +196,7 @@ internal sealed class IdentityHtmlSession : IDisposable
         SteamHTMLSurface.ExecuteJavascript(control, $$"""
             (function(){if(!({{Guard}}))return; const s=window.__nrIdentity;
               if(s&&!s.wanted&&s.account==='{{account}}'&&s.target==='{{target}}'){
-                clearTimeout(s.timer);s.timer=setTimeout(()=>s.restore(null),30000);} })();
+                clearTimeout(s.timer);s.timer=setTimeout(()=>s.restore(null),{{IdentityRecoveryHandoff.BrowserWatchdogMs}});} })();
             """);
     }
 
@@ -304,9 +304,13 @@ internal sealed class IdentityHtmlSession : IDisposable
     public void Dispose()
     {
         if (!initialized) return;
-        if (control != HHTMLBrowser.Invalid) SteamHTMLSurface.RemoveBrowser(control);
-        if (verifier != HHTMLBrowser.Invalid) SteamHTMLSurface.RemoveBrowser(verifier);
-        foreach (var callback in callbacks) callback.Dispose();
-        callbacks.Clear(); SteamHTMLSurface.Shutdown(); initialized = false;
+        initialized = false;
+        var cleanup = new List<Action>();
+        if (control != HHTMLBrowser.Invalid) cleanup.Add(() => SteamHTMLSurface.RemoveBrowser(control));
+        if (verifier != HHTMLBrowser.Invalid) cleanup.Add(() => SteamHTMLSurface.RemoveBrowser(verifier));
+        cleanup.AddRange(callbacks.Select<IDisposable, Action>(callback => callback.Dispose));
+        cleanup.Add(() => SteamHTMLSurface.Shutdown());
+        try { IdentitySessionCoordinator.ReleaseResources(cleanup); }
+        finally { callbacks.Clear(); }
     }
 }

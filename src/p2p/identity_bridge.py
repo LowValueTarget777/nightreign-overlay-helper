@@ -20,8 +20,9 @@ from .service import resolve_helper_path
 
 _STATES = {"idle", "preparing", "blocked", "restoring", "restored", "recovery_pending", "error"}
 _FINAL = {"restored", "error"}
-_STEAM_LIFECYCLE = "on_demand_v1"
-_MATCH_LIFECYCLE = "match_hold_v3"
+_STEAM_LIFECYCLE = "on_demand_v2"
+_MATCH_LIFECYCLE = "match_hold_v4"
+_WORKER_GRACE_SECONDS = 30
 _BUSY = {"preparing", "blocked", "restoring", "recovery_pending"}
 _PREPARATION_CODES = {"browser_start", "page_timeout", "page_controls", "page_account",
                       "page_preblocked", "prepare_cancelled", "steam_account", "peer_departed",
@@ -83,6 +84,8 @@ class IdentityBridge(QObject):
         self._started = False
         self._last_launch = -100.0
         self._last_lease = -100.0
+        self._last_compatible_seen = float('-inf')
+        self._poll_reason = 'starting'
         self._worker = None
         self._worker_path = None
         self._last_status_log = None
@@ -198,11 +201,11 @@ class IdentityBridge(QObject):
             # contain player IDs or remote error text; none of that is logged.
             diagnostic = (self.status.get("state") if self.status.get("state") in _STATES else "unknown",
                           self._compatible_worker, bool(self.status.get("accepts_begin")), self._pending is not None,
-                          self.status.get("diagnostic_code", ""))
+                          self.status.get("diagnostic_code", ""), self._poll_reason)
             if diagnostic != self._last_status_log:
                 self._last_status_log = diagnostic
-                state, compatible, accepts, pending, code = diagnostic
-                info(f"Identity worker state={state} compatible={compatible} accepts_begin={accepts} pending={pending} slot={self._slot if self._slot is not None else 'legacy'} reason={code or 'none'}")
+                state, compatible, accepts, pending, code, heartbeat = diagnostic
+                info(f"Identity worker state={state} compatible={compatible} accepts_begin={accepts} pending={pending} slot={self._slot if self._slot is not None else 'legacy'} reason={code or 'none'} heartbeat={heartbeat}")
 
     def _warn_worker(self, reason, helper, exitcode=None):
         # A failed child may be retried every five seconds. Keep the first
@@ -218,6 +221,7 @@ class IdentityBridge(QObject):
 
     def _poll_worker(self):
         now = time.monotonic()
+        self._poll_reason = 'status_missing'
         if self._worker is not None:
             exitcode = self._worker.poll()
             if isinstance(exitcode, int):
@@ -230,6 +234,7 @@ class IdentityBridge(QObject):
         value = _read_json(self._root / "status.json")
         fresh = False
         if value and value.get("state") in _STATES:
+            self._poll_reason = 'status_expired'
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(value["updated_at"])).total_seconds()
                 fresh = -5 <= age < 8
@@ -247,6 +252,8 @@ class IdentityBridge(QObject):
                 self._pending = None
                 self._apply(value)
             if value.get("steam_lifecycle") != self._lifecycle:
+                self._poll_reason = 'old_lifecycle'
+                self._last_compatible_seen = float('-inf')
                 self._drop_lease()
                 state = ("recovery_pending" if self._pending or value["state"] in _BUSY
                          else "restored" if value["state"] == "restored" else "error")
@@ -254,16 +261,15 @@ class IdentityBridge(QObject):
                           value.get("target") or self.status.get("target", ""),
                           self._pending or value.get("transaction", ""))
                 return
-            if now - self._last_lease >= 1:
-                try:
-                    _write_json(self._root / "clients" / (self._client + ".json"),
-                                {"client": self._client, "hold_target": self.hold_target})
-                    self._last_lease = now
-                except OSError:
-                    self._set("recovery_pending", "无法更新识别组件状态；已有恢复操作会独立继续",
-                              self.status.get("target", ""), self._pending or self.status.get("transaction", ""))
+            exiting = value.get('worker_exiting') is True
+            self._poll_reason = 'worker_exiting' if exiting else 'fresh'
+            if not exiting:
+                self._last_compatible_seen = now
+                if not self._renew_lease(now):
                     return
-            self._compatible_worker = True
+                self._compatible_worker = True
+            else:
+                self._drop_lease()
             if (self._pending and now - self._pending_since > 30
                   and value.get("state") == "idle"
                   and not (self._root / "requests" / (self._pending + ".json")).exists()
@@ -279,9 +285,21 @@ class IdentityBridge(QObject):
                 # even if the worker has already returned to idle.
                 self._apply(completion)
             elif self._pending is None or value.get("transaction") == self._pending or value.get("state") == "recovery_pending":
-                self._apply(value, allow_begin=True)
+                self._apply(value, allow_begin=not exiting)
+            if not exiting:
+                return
+        elif (now - self._last_compatible_seen < _WORKER_GRACE_SECONDS
+                and self.status.get('state') in {'preparing', 'blocked'}
+                and (value is None or value.get('steam_lifecycle') == self._lifecycle)):
+            # A status-file read gap is not proof of parent death or teammate
+            # departure. Keep this already verified owner's lease for 30s;
+            # no new request can use a stale capability acknowledgement.
+            self._poll_reason = 'worker_outage_grace'
+            self.status['accepts_begin'] = False
+            self._renew_lease(now)
             return
-        self._drop_lease()
+        else:
+            self._drop_lease()
         if self.status.get("accepts_begin"):
             self._set("recovery_pending" if self._pending else "preparing", "正在等待恢复组件确认版本",
                       self.status.get("target", ""), self._pending or self.status.get("transaction", ""))
@@ -305,6 +323,27 @@ class IdentityBridge(QObject):
             except OSError:
                 self._warn_worker("launch failed", helper)
                 self._set("error", "无法启动身份识别组件；请重新打开应用以继续恢复")
+
+    def _renew_lease(self, now):
+        if now - self._last_lease < 1:
+            return True
+        try:
+            _write_json(self._root / 'clients' / (self._client + '.json'),
+                        {'client': self._client, 'hold_target': self.hold_target})
+            self._last_lease = now
+            return True
+        except OSError:
+            if (self.status.get('state') in {'preparing', 'blocked'} and self.hold_target
+                    and 0 <= now - self._last_lease < _WORKER_GRACE_SECONDS):
+                # A single locked-file/write failure must not change blocked
+                # telemetry into recovery_pending and make the controller
+                # publish an empty target on the next successful heartbeat.
+                self._poll_reason = 'lease_write_grace'
+                self.status['accepts_begin'] = False
+                return False
+            self._set('recovery_pending', '无法更新识别组件状态；已有恢复操作会独立继续',
+                      self.status.get('target', ''), self._pending or self.status.get('transaction', ''))
+            return False
 
     def _pending_on_disk(self) -> bool:
         claim = _read_json(self._root / "active-request.json")
