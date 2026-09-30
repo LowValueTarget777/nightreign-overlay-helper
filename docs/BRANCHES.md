@@ -7,7 +7,7 @@
 | 分支 | 用途 | 整理时位置 |
 | --- | --- | --- |
 | `main` | Python 维护主线 | `bcb79c4` 功能提交，随后追加本次整理文档 |
-| `LVT/match-name-block` | 当前：Ping 就绪屏蔽非好友，失败重试、离队恢复，独立逐人点赞窗口 | `0.10.10.dev7`；100 项 Python / 40 项原生离线测试；修正自定义资料地址导致超时，实际失败目标只读核验通过，真实闭环待复验 |
+| `LVT/match-name-block` | 当前：非好友屏蔽与恢复、独立逐人点赞窗口、可选累计匹配次数 | `0.10.10.dev8`；115 项 Python 离线测试；原生未改沿用 dev7 的 40 项结果，真实计数及完整闭环待验收 |
 | `LVT/teammate-hud` | 已停止推进的头像左侧 HUD 实验，保留历史 | `0.10.9.dev8` / `b8550a8`；未合入 main |
 | `LVT/stable-python` | 重构前稳定基线 | `41d91b1` |
 | `LVT/experimental/csharp-rewrite` | C# 重构实验 | `eb44e42` |

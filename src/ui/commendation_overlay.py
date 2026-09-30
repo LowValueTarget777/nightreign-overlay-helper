@@ -3,6 +3,7 @@ from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .p2p_overlay import SteamProfileLabel
+from src.p2p.encounters import encounter_text
 from .utils import set_widget_always_on_top
 
 
@@ -20,6 +21,7 @@ class CommendationOverlayWidget(QWidget):
         self.draggable = True
         self.scale = 1.0
         self.rows = []
+        self.encounter_counts = None
         self._name_labels = {}
         self._drag_position = None
         self.enabled = True
@@ -67,7 +69,8 @@ class CommendationOverlayWidget(QWidget):
             label.setStyleSheet(f"color: {'#66c0f4' if row['enabled'] else '#a0a0a0'}; font-size: {int(13*self.scale)}px;")
             label.setToolTip(f"{row['status']}\n将发送：{row['comment']}\n同一账号对同一队友默认间隔七天")
             self._name_labels[target] = label
-            status = QLabel(row['status'])
+            count_text = encounter_text(self.encounter_counts, target)
+            status = QLabel(f"{count_text} · {row['status']}" if count_text else row['status'])
             status.setTextFormat(Qt.TextFormat.PlainText)
             status.setWordWrap(True)
             status.setStyleSheet(f'color: #c8c8c8; font-size: {int(11*self.scale)}px;')
@@ -78,6 +81,10 @@ class CommendationOverlayWidget(QWidget):
             label.deleteLater()
         self.adjustSize()
         self._update_visibility()
+
+    def set_encounter_counts(self, counts):
+        self.encounter_counts = dict(counts) if counts is not None else None
+        self.set_rows(self.rows)
 
     def _request_commend(self, target):
         if any(r['steam_id'] == target and r['enabled'] for r in self.rows):

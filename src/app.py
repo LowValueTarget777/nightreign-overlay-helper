@@ -18,6 +18,7 @@ from src.ui.admin_prompt import show_admin_prompt
 from src.p2p import P2PService, SteamPlaytimeService
 from src.p2p.match_block import MatchBlockController
 from src.p2p.commendation import CommendationService
+from src.p2p.encounters import EncounterService
 from src.updater import Updater
 from src.common import APP_FULLNAME, APP_VERSION, ICON_PATH
 from src.logger import info, warning, error
@@ -94,10 +95,17 @@ if __name__ == "__main__":
     commendation.rows_changed.connect(commend_overlay.set_rows)
     commend_overlay.commend_requested.connect(commendation.send)
     commend_overlay.dismiss_requested.connect(commendation.dismiss)
+    encounters = EncounterService()
+    p2p_service.snapshot_received.connect(encounters.set_peers)
+    p2p_service.status_changed.connect(encounters.set_status)
+    updater.expedition_started.connect(encounters.on_day_one)
+    encounters.counts_changed.connect(p2p_overlay.set_encounter_counts)
+    encounters.counts_changed.connect(commend_overlay.set_encounter_counts)
     updater.game_foreground_changed.connect(p2p_overlay.set_game_foreground)
     updater.game_foreground_changed.connect(commend_overlay.set_game_foreground)
     settings_window = SettingsWindow(
-        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service, match_block, commendation, commend_overlay
+        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service,
+        match_block, commendation, commend_overlay, encounters
     )
     
     # 创建系统托盘图标和菜单

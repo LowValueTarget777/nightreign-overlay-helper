@@ -616,6 +616,20 @@ class SettingsWindow(QWidget):
         if self.commendation is not None:
             self.commendation.status_changed.connect(self.commendation_status.setText)
 
+        self.encounters_checkbox = QCheckBox("记录非好友队友的累计匹配次数")
+        self.encounters_checkbox.setChecked(False)
+        self.encounters_checkbox.stateChanged.connect(self.update_encounter_settings)
+        layout.addWidget(self.encounters_checkbox)
+        encounter_hint = QLabel("默认关闭。识别 DAY1 后记录开局非好友，每局同一人只计一次；次数显示在延迟框和点赞窗口，按 SteamID 保存，改名不影响。中途启动未看到 DAY1 不补算，关闭后保留记录。")
+        encounter_hint.setWordWrap(True)
+        encounter_hint.setStyleSheet("color: gray;")
+        layout.addWidget(encounter_hint)
+        self.encounters_status = QLabel("次数记录已关闭，已有记录保留")
+        self.encounters_status.setWordWrap(True)
+        layout.addWidget(self.encounters_status)
+        if self.encounters is not None:
+            self.encounters.status_changed.connect(self.encounters_status.setText)
+
         size_layout = QHBoxLayout()
         size_layout.addWidget(QLabel("悬浮窗大小"))
         self.p2p_size_slider = QSlider(Qt.Orientation.Horizontal)
@@ -866,12 +880,16 @@ class SettingsWindow(QWidget):
             self.playtime_enabled_checkbox.blockSignals(True)
             self.playtime_enabled_checkbox.setChecked(data.get("p2p_playtime_enabled", False))
             self.playtime_enabled_checkbox.blockSignals(False)
+            self.encounters_checkbox.blockSignals(True)
+            self.encounters_checkbox.setChecked(data.get("encounters_enabled", False))
+            self.encounters_checkbox.blockSignals(False)
             self.update_p2p_enabled()
             self.match_block_checkbox.setChecked(data.get("match_block_enabled", False))
             self.update_match_block_enabled()
             self.commendation_checkbox.setChecked(data.get("commendation_enabled", True))
             self.commendation_text.setPlainText(data.get("commendation_comment", self.commendation_text.toPlainText()))
             self.update_commendation_settings()
+            self.update_encounter_settings()
             if self.commend_overlay is not None:
                 x, y = data.get('commendation_x'), data.get('commendation_y')
                 if type(x) is int and type(y) is int:
@@ -965,6 +983,7 @@ class SettingsWindow(QWidget):
                 "p2p_enabled": self.p2p_enabled_checkbox.isChecked(),
                 "match_block_enabled": self.match_block_checkbox.isChecked(),
                 "commendation_enabled": self.commendation_checkbox.isChecked(),
+                "encounters_enabled": self.encounters_checkbox.isChecked(),
                 "commendation_comment": self.commendation_text.toPlainText(),
                 "p2p_size": self.p2p_size_slider.value(),
                 "p2p_opacity": self.p2p_opacity_slider.value(),
@@ -1065,6 +1084,7 @@ class SettingsWindow(QWidget):
         match_block=None,
         commendation=None,
         commend_overlay=None,
+        encounters=None,
     ):
         super().__init__()
         config = Config.get()
@@ -1078,6 +1098,7 @@ class SettingsWindow(QWidget):
         self.match_block = match_block
         self.commendation = commendation
         self.commend_overlay = commend_overlay
+        self.encounters = encounters
         self.update_p2p_overlay_ui_state_signal.connect(p2p_overlay.update_ui_state)
         if commend_overlay is not None:
             self.update_p2p_overlay_ui_state_signal.connect(commend_overlay.update_ui_state)
@@ -1633,6 +1654,7 @@ class SettingsWindow(QWidget):
         self.p2p_service.set_enabled(enabled)
         self.update_match_block_enabled()
         self.update_commendation_settings()
+        self.update_encounter_settings()
         self.update_p2p_overlay_ui_state_signal.emit(P2POverlayUIState(enabled=enabled))
         info(f"P2P info enabled: {enabled}")
 
@@ -1646,9 +1668,24 @@ class SettingsWindow(QWidget):
         if not hasattr(self, 'commendation_text'):
             return
         enabled = self.p2p_enabled_checkbox.isChecked() and self.commendation_checkbox.isChecked()
-        self.updater.match_tracking_enabled = enabled
+        self.update_match_tracking()
         if self.commendation is not None:
             self.commendation.configure(enabled, self.commendation_text.toPlainText())
+
+    def update_match_tracking(self):
+        counts_enabled = hasattr(self, 'encounters_checkbox') and self.encounters_checkbox.isChecked()
+        self.updater.match_tracking_enabled = self.p2p_enabled_checkbox.isChecked() and (
+            self.commendation_checkbox.isChecked() or counts_enabled)
+
+    def update_encounter_settings(self, state=None):
+        if not hasattr(self, 'encounters_checkbox'):
+            return
+        enabled = self.p2p_enabled_checkbox.isChecked() and self.encounters_checkbox.isChecked()
+        self.update_match_tracking()
+        if self.encounters is not None:
+            self.encounters.configure(enabled)
+        if state is not None:
+            self.save_settings()
 
     def update_p2p_size(self, value):
         self.update_p2p_overlay_ui_state_signal.emit(P2POverlayUIState(scale=value / 100.0))

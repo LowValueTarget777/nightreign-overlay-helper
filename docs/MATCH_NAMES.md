@@ -1,10 +1,10 @@
 # 队友名字与留言点赞
 
-当前试用版本 `0.10.10.dev7`，分支 `LVT/match-name-block`，从 `bcb79c4` 建立。保留统一延迟框，点赞使用独立限时窗口，未使用游戏内存、OCR 或头像左侧 HUD。旧版本验收记录见 PROJECT_STATUS.md。
+当前试用版本 `0.10.10.dev8`，分支 `LVT/match-name-block`，从 `bcb79c4` 建立。保留统一延迟框，点赞使用独立限时窗口，增加可选累计匹配次数，未使用游戏内存、OCR 或头像左侧 HUD。旧版本验收记录见 PROJECT_STATUS.md。
 
 ## 使用
 
-退出旧助手，运行 `dist/nightreign-teammate-departure/nightreign-overlay-helper.exe`。升级时旧组件先恢复并退出，通常空闲一分钟后自动交接；新版检查 `match_hold_v3`，不会复用旧版核验逻辑。设置 → 队友信息可开启“读到队友延迟后自动屏蔽通信以显示 Steam 名字”，首次默认关闭、保存后记忆。
+退出旧助手，运行 `dist/nightreign-teammate-encounters/nightreign-overlay-helper.exe`。升级时旧组件先恢复并退出，通常空闲一分钟后自动交接；新版检查 `match_hold_v3`，不会复用旧版核验逻辑。设置 → 队友信息可开启“读到队友延迟后自动屏蔽通信以显示 Steam 名字”，首次默认关闭、保存后记忆。
 
 开启后，活动名单新鲜、连接正常、非好友且具有有效非负整数 Ping 即可尝试，不再依赖 DAY1、前台状态或入队时间窗口。在大厅也可以开始处理，游戏里名字切换仍依赖游戏自身进入对局后的行为。
 
@@ -24,6 +24,14 @@ Steam 可把数字资料地址跳到自定义 `/id/` 地址；两种都支持，
 
 每个 Steam 账号对同一目标默认七天间隔。记录位于 `%LOCALAPPDATA%/NightreignOverlayHelper/identity/commendations`，发送前原子落盘并加目标锁。成功、网络结果不确定或发送过程崩溃，都保留间隔，防止重复留言；结果不确定请到主页核对。服务器明确拒绝或网页在提交前明确拒绝时，一分钟后允许手动重试，不会自动重发。记录损坏或无法落盘时停止发送。
 
+## 累计匹配次数
+
+设置 → 队友信息 →“记录非好友队友的累计匹配次数”，默认关闭、切换立即记忆。按用户选择只记录非好友，与屏蔽和点赞开关独立，仍需启用队友信息。开启后显示每位已记录队友的“累计匹配 N 次”，位于延迟框的名字下方及独立点赞窗口；没有历史的玩家不显示次数。
+
+以实际前台 DAY1 为开局确认，首分钟接收本局最多两位队友的新鲜名单，等待 Steam 好友关系确认。同一 SteamID 每局只计一次，名单刷新、改名、掉线重连、关闭再打开不重复计数，下一局再遇到加一。普通非好友（关系 0）和已屏蔽通信的非好友（关系 5）可记录，好友（3/6）、未知与申请中关系跳过。首分钟之后不把新的大厅连接补记到上一局。助手中途启动或开启时没有看到 DAY1，就从下一次确认开局开始，不补历史次数。
+
+记录只在本地 `%APPDATA%/nightreign-overlay-helper/encounters/{当前 Steam 账号}.json`，包含 SteamID、最近记录时的昵称、累计次数和本局去重信息。次数与去重状态一次原子保存，账号文件锁防止两个助手同时重复计数；短暂 DAY1 重启重见结合开机时钟和 UTC 去重。断网不会删除历史；保存失败不提前显示增加的数字，已观察到的队友在后续名单更新时重试保存。记录损坏则保留文件并暂停写入。关闭功能不清空历史，Steam 账号切换分别保存。接口没有邀请/匹配来源，未加好友的邀请玩家也会按非好友记录。
+
 ## 独立通信恢复
 
 两位屏蔽目标各使用独立原生进程，记录在 `%LOCALAPPDATA%/NightreignOverlayHelper/identity/match-0` 与 `match-1`。屏蔽前保存原账号、目标、事务与关系；主应用每秒续约，原生与网页独立检查恢复条件，最长持有四小时。正常退出请求解除，不强杀恢复进程。
@@ -35,10 +43,10 @@ Steam 可把数字资料地址跳到自定义 `/id/` 地址；两种都支持，
 已纳入 Git 的离线入口：
 
 ```powershell
-python -m unittest scripts.test_p2p_profile_click scripts.test_settings_cleanup scripts.test_performance scripts.test_match_block scripts.test_identity_bridge scripts.test_capture_target scripts.test_commendation
+python -m unittest scripts.test_p2p_profile_click scripts.test_settings_cleanup scripts.test_performance scripts.test_match_block scripts.test_identity_bridge scripts.test_capture_target scripts.test_commendation scripts.test_encounters
 dotnet run --project scripts/identity_native_tests/IdentityRecoveryTests.csproj -c Release
 ```
 
-100 项 Python、40 项原生离线测试通过，包含好友留房时野人离开、各自两分钟期限、独立窗口与位置保存、重复准备退避、真实文件 IPC 的短暂终态处理、自定义资料地址及来源拒绝。设置和两个窗口离线渲染检查通过。dev6 的真实失败目标只读诊断确认自定义地址跳转，修复后约四秒通过核验。用户授权的小号 Controller（76561198049468922）此前收到一条功能测试留言，新版只读复查仍存在；七天间隔此前实测拦截第二次发送。本轮没有执行屏蔽或发送新留言。
+115 项 Python 离线测试通过，新增非好友计数、每局去重、改名、重启、跨账号、写入失败、多实例文件锁和点击期间刷新覆盖。原生组件未改，沿用 dev7 的 40 项原生离线结果；包括好友留房时野人离开、各自两分钟期限、独立窗口与位置保存、重复准备退避、真实文件 IPC 的短暂终态处理、自定义资料地址及来源拒绝。设置和两个窗口离线渲染检查通过。dev6 的真实失败目标此前只读诊断确认自定义地址跳转，dev7 修复后约四秒通过核验。用户授权的小号 Controller（76561198049468922）此前收到一条功能测试留言，dev7 只读复查仍存在；七天间隔此前实测拦截第二次发送。本轮增加计数时没有新的 Steam 操作。
 
-真实匹配的提前屏蔽、双队友持续持有、结束判定、断网与主应用崩溃恢复仍待复验。小号测试不代表所有隐私设置主页或完整游戏流程均已验收。包内 build-info.json 标识源码、测试和构建；尚未推送或正式发布。
+真实累计匹配次数、提前屏蔽、双队友持续持有、结束判定、断网与主应用崩溃恢复仍待复验。小号测试不代表所有隐私设置主页或完整游戏流程均已验收。包内 build-info.json 标识源码、测试和构建；尚未推送或正式发布。
