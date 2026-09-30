@@ -18,6 +18,10 @@ internal static class Program
             return IdentityWorker.Run(slot);
         if (args.Contains("--identity-worker"))
             return IdentityWorker.Run();
+        if (args.SequenceEqual(new[] { "--commend" }))
+            return CommendationWorker.Run();
+        if (args.SequenceEqual(new[] { "--commend-check" }))
+            return CommendationWorker.Run(checkOnly: true);
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.InputEncoding = System.Text.Encoding.UTF8;
 

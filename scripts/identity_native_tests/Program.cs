@@ -146,6 +146,7 @@ internal static class Program
         });
         IdentitySessionTests.Run(Test);
         IdentityPreparationTests.Run(Test);
+        CommendationTests.Run(Test);
         Console.WriteLine($"{passed} offline recovery/lifecycle tests passed; no Steam calls.");
         return 0;
     }

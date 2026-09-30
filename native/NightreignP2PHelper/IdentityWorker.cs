@@ -398,7 +398,7 @@ internal static class IdentityWorker
         return SteamNetworkingMessages.GetSessionConnectionInfo(ref identity, out _, out _)
             == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected;
     }
-    private static bool Connect()
+    internal static bool Connect()
     {
         try
         {
@@ -427,7 +427,7 @@ internal static class IdentityWorker
         }
         catch { return false; }
     }
-    private static void Disconnect() => IdentitySessionCoordinator.Release(ref steamReady, SteamAPI.Shutdown);
+    internal static void Disconnect() => IdentitySessionCoordinator.Release(ref steamReady, SteamAPI.Shutdown);
     private static void Result(string id, string peer, string resultState, string resultMessage, string code = "")
     {
         try { IdentityFiles.Write(Path.Combine(Root, "results", id + ".json"),

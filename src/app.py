@@ -16,6 +16,7 @@ from src.ui.settings import SettingsWindow
 from src.ui.admin_prompt import show_admin_prompt
 from src.p2p import P2PService, SteamPlaytimeService
 from src.p2p.match_block import MatchBlockController
+from src.p2p.commendation import CommendationService
 from src.updater import Updater
 from src.common import APP_FULLNAME, APP_VERSION, ICON_PATH
 from src.logger import info, warning, error
@@ -84,10 +85,15 @@ if __name__ == "__main__":
     match_block = MatchBlockController()
     p2p_service.snapshot_received.connect(match_block.set_peers)
     p2p_service.status_changed.connect(match_block.set_status)
-    updater.expedition_started.connect(match_block.on_day_one)
+    commendation = CommendationService(blocker=match_block)
+    p2p_service.snapshot_received.connect(commendation.set_peers)
+    p2p_service.status_changed.connect(commendation.set_status)
+    updater.expedition_started.connect(commendation.on_day_one)
+    commendation.rows_changed.connect(p2p_overlay.set_commend_rows)
+    p2p_overlay.commend_requested.connect(commendation.send)
     updater.game_foreground_changed.connect(p2p_overlay.set_game_foreground)
     settings_window = SettingsWindow(
-        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service, match_block
+        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service, match_block, commendation
     )
     
     # 创建系统托盘图标和菜单
@@ -106,6 +112,9 @@ if __name__ == "__main__":
     # activating the settings window.
     settings_action.triggered.connect(lambda: QTimer.singleShot(0, show_settings))
     menu.addAction(settings_action)
+    commend_action = QAction("结束本局 / 显示队友点赞入口")
+    commend_action.triggered.connect(commendation.finish_match)
+    menu.addAction(commend_action)
     quit_action = QAction("退出")
     quit_action.triggered.connect(app.quit)
     menu.addAction(quit_action)
@@ -156,6 +165,7 @@ if __name__ == "__main__":
     def on_quit():
         info("Stopping worker thread...")
         playtime_service.stop()
+        commendation.stop()
         match_block.stop()
         p2p_service.stop()
         updater.stop()

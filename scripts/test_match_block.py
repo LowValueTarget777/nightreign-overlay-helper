@@ -62,12 +62,19 @@ class MatchPolicyTests(unittest.TestCase):
 
     def opening(self, peers):
         self.feed(peers)
-        self.controller.on_day_one(self.now)
         self.feed(peers, 6)
 
-    def test_lobby_has_no_blocks_and_manual_timer_cannot_authorize(self):
-        for _ in range(20): self.feed([peer()], 10)
-        self.assertFalse(any(b.begins for b in self.bridges))
+    def test_ping_ready_peer_starts_without_day1(self):
+        self.feed([peer()])
+        self.assertEqual(self.bridges[0].begins, [peer().steam_id])
+
+    def test_missing_or_invalid_ping_waits_then_valid_ping_starts(self):
+        from dataclasses import replace
+        for ping in (None, -1, True):
+            self.feed([replace(peer(), ping_ms=ping)])
+            self.assertFalse(any(b.begins for b in self.bridges))
+        self.feed([replace(peer(), ping_ms=0)])
+        self.assertEqual(self.bridges[0].begins, [peer().steam_id])
 
     def test_three_expeditions_release_completed_slots_with_real_file_bridge(self):
         from datetime import datetime, timezone
@@ -94,7 +101,6 @@ class MatchPolicyTests(unittest.TestCase):
                 for players in ([peer(1), peer(2)], [peer(3), peer(4)], [peer(3), peer(4)]):
                     self.now += 600
                     controller.set_peers(players)
-                    controller.on_day_one(self.now)
                     self.now += 6
                     controller.set_peers(players)
                     self.assertEqual(len(controller.assigned), 2)
@@ -147,12 +153,11 @@ class MatchPolicyTests(unittest.TestCase):
             self.assertFalse(any(b.begins for b in self.bridges))
             self.now += 200
 
-    def test_longstanding_lobby_nonfriend_is_excluded(self):
+    def test_longstanding_nonfriend_is_processed_once_when_ping_ready(self):
         self.feed([peer()])
         self.feed([peer()], 130)
-        self.controller.on_day_one(self.now)
         self.feed([peer()], 6)
-        self.assertFalse(any(b.begins for b in self.bridges))
+        self.assertEqual(len(self.bridges[0].begins), 1)
 
     def test_departed_peer_only_is_restored(self):
         self.opening([peer(1), peer(2)])
@@ -163,7 +168,6 @@ class MatchPolicyTests(unittest.TestCase):
     def test_staying_in_room_across_day1_does_not_restore_or_double_block(self):
         self.opening([peer()])
         self.feed([peer(1, 5)], 600)
-        self.controller.on_day_one(self.now)
         self.feed([peer(1, 5)], 6)
         self.assertEqual(self.bridges[0].restores, 0)
         self.assertEqual(self.bridges[0].begins, [peer().steam_id])
@@ -174,34 +178,22 @@ class MatchPolicyTests(unittest.TestCase):
         self.controller.tick()
         self.assertEqual(self.bridges[0].restores, 1)
 
-    def test_helper_failure_restores_and_invalidates_day1(self):
+    def test_helper_failure_restores_and_invalidates_snapshot(self):
         self.opening([peer()])
         self.controller.set_status(NS(state='runtime_error'))
         self.assertEqual(self.bridges[0].restores, 1)
-        self.assertIsNone(self.controller.day_one)
+        self.assertEqual(self.controller.last_snapshot, float("-inf"))
 
-    def test_disable_restore_and_enable_cannot_reuse_day1(self):
-        self.opening([peer()])
+    def test_disabled_waits_and_enabling_midgame_processes_fresh_peers(self):
         self.controller.set_enabled(False)
-        self.assertEqual(self.bridges[0].restores, 1)
-        self.controller.set_enabled(True)
-        self.feed([peer(2)])
-        self.assertFalse(self.bridges[1].begins)
-
-    def test_late_or_duplicate_day1_is_not_authorization(self):
         self.feed([peer()])
-        self.controller.on_day_one(self.now-10)
-        self.assertIsNone(self.controller.day_one)
-        self.controller.on_day_one(self.now)
-        day = self.controller.day_one
-        self.now += 3
-        self.controller.on_day_one(self.now)
-        self.assertEqual(self.controller.day_one, day)
+        self.assertFalse(self.bridges[0].begins)
+        self.controller.set_enabled(True)
+        self.assertEqual(self.bridges[0].begins, [peer().steam_id])
 
-    def test_late_joiner_outside_opening_is_excluded(self):
-        self.controller.on_day_one(self.now)
-        self.feed([peer()], 35)
-        self.assertFalse(any(b.begins for b in self.bridges))
+    def test_late_joiner_is_processed_when_ping_is_ready(self):
+        self.feed([peer()], 200)
+        self.assertEqual(self.bridges[0].begins, [peer().steam_id])
 
     def test_recovery_pending_blocks_new_operations(self):
         self.legacy.status.update(state='recovery_pending')
@@ -216,6 +208,16 @@ class MatchPolicyTests(unittest.TestCase):
         self.assertEqual(len(self.bridges[0].begins), 1)
         self.assertFalse(self.bridges[1].begins)
 
+    def test_returning_same_peer_can_start_after_departure_recovery_finishes(self):
+        self.feed([peer()])
+        self.feed([])
+        self.feed([peer()])
+        self.assertEqual(len(self.bridges[0].begins), 1)
+        self.bridges[0]._pending = None
+        self.bridges[0].status.update(state='restored', accepts_begin=True)
+        self.feed([peer()])
+        self.assertEqual(len(self.bridges[0].begins), 2)
+
     def test_shutdown_keeps_native_recovery_owner(self):
         self.opening([peer()])
         self.controller.stop()
@@ -229,36 +231,22 @@ class MatchPolicyTests(unittest.TestCase):
         data['peers'][0]['relationship'] = True
         with self.assertRaises(ValueError): parse_helper_message(json.dumps(data))
 
-    def test_day1_signal_uses_actual_detection_even_when_timer_is_off(self):
-        from src.updater import Updater
-        detector = Mock()
-        detector.detect.return_value = NS(day_detect_result=NS(start_day1=True))
-        updater = NS(dayx_detect_enabled=False, match_block_enabled=True,
-                     day1_detect_region=(0, 0, 200, 100), dayx_detect_lang='chs',
-                     hdr_processing_enabled=False, detector=detector,
-                     _last_foreground=True, _match_day1_visible=False,
-                     expedition_started=NS(emit=self.controller.on_day_one))
-        self.feed([peer()])
-        with patch('src.updater.time.monotonic', return_value=self.now):
-            Updater.detect_and_update_dayx(updater)
-        self.feed([peer()], 6)
-        self.assertEqual(self.bridges[0].begins, [peer().steam_id])
-        day = self.controller.day_one
-        with patch('src.updater.time.monotonic', return_value=self.now):
-            Updater.detect_and_update_dayx(updater)
-        self.assertEqual(self.controller.day_one, day)
-
-    def test_background_day1_does_not_authorize_block(self):
+    def test_day1_signal_is_only_for_match_roster_when_timer_is_off(self):
         from src.updater import Updater
         detector = Mock()
         detector.detect.return_value = NS(day_detect_result=NS(start_day1=True))
         signal = Mock()
-        updater = NS(dayx_detect_enabled=False, match_block_enabled=True,
+        updater = NS(dayx_detect_enabled=False, match_tracking_enabled=True,
                      day1_detect_region=(0, 0, 200, 100), dayx_detect_lang='chs',
                      hdr_processing_enabled=False, detector=detector,
-                     _last_foreground=False, _match_day1_visible=False, expedition_started=signal)
+                     _last_foreground=True, _match_day1_visible=False, expedition_started=signal)
         Updater.detect_and_update_dayx(updater)
-        signal.emit.assert_not_called()
+        Updater.detect_and_update_dayx(updater)
+        signal.emit.assert_called_once()
+        updater._last_foreground = False
+        updater._match_day1_visible = False
+        Updater.detect_and_update_dayx(updater)
+        signal.emit.assert_called_once()
 
 
 if __name__ == '__main__': unittest.main()

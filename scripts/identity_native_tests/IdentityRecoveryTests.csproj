@@ -10,5 +10,6 @@
     <Compile Include="../../native/NightreignP2PHelper/IdentityRecoveryEngine.cs" Link="IdentityRecoveryEngine.cs" />
     <Compile Include="../../native/NightreignP2PHelper/IdentitySessionCoordinator.cs" Link="IdentitySessionCoordinator.cs" />
     <Compile Include="../../native/NightreignP2PHelper/IdentityPreparation.cs" Link="IdentityPreparation.cs" />
+    <Compile Include="../../native/NightreignP2PHelper/CommendationHistory.cs" Link="CommendationHistory.cs" />
   </ItemGroup>
 </Project>

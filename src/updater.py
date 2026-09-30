@@ -91,6 +91,7 @@ class Updater(QObject):
         self.only_detect_when_game_foreground: bool = False
         self.detect_interval = 0.2
         self.match_block_enabled = False
+        self.match_tracking_enabled = False
         self._match_day1_visible = False
 
         self.input_block_signals_signal.connect(input.blockSignals)
@@ -226,7 +227,7 @@ class Updater(QObject):
                     self.phase_start_time = self.get_time()
 
     def detect_and_update_dayx(self):
-        if not self.dayx_detect_enabled and not self.match_block_enabled:
+        if not self.dayx_detect_enabled and not getattr(self, 'match_tracking_enabled', False):
             return
         param = DetectParam(
             day_detect_param=DayDetectParam(
@@ -238,7 +239,7 @@ class Updater(QObject):
         captured_at = time.monotonic()
         result = self.detector.detect(param)
         day1 = bool(result.day_detect_result.start_day1)
-        if self.match_block_enabled and getattr(self, '_last_foreground', False):
+        if getattr(self, 'match_tracking_enabled', False) and getattr(self, '_last_foreground', False):
             if day1 and not self._match_day1_visible:
                 self.expedition_started.emit(captured_at)
             self._match_day1_visible = day1

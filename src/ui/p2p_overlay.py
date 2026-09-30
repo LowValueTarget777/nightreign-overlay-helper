@@ -52,7 +52,7 @@ class SteamProfileLabel(QLabel):
 
     clicked = pyqtSignal(str)
 
-    def __init__(self, steam_id: str, overlay: P2POverlayWidget):
+    def __init__(self, steam_id: str, overlay: P2POverlayWidget, action=None):
         super().__init__()
         self.steam_id = steam_id
         self.overlay = overlay
@@ -60,7 +60,7 @@ class SteamProfileLabel(QLabel):
         self._dragged = False
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clicked.connect(overlay._open_steam_profile, Qt.ConnectionType.QueuedConnection)
+        self.clicked.connect(action or overlay._open_steam_profile, Qt.ConnectionType.QueuedConnection)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -103,6 +103,7 @@ class SteamProfileLabel(QLabel):
 
 class P2POverlayWidget(QWidget):
     right_click_signal = pyqtSignal()
+    commend_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -130,6 +131,8 @@ class P2POverlayWidget(QWidget):
         self.peers: list[P2PPeer] = []
         self.playtimes: dict[str, PlaytimeResult] = {}
         self._name_labels: dict[str, SteamProfileLabel] = {}
+        self.commend_rows = []
+        self._commend_labels = {}
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -157,6 +160,11 @@ class P2POverlayWidget(QWidget):
         self.peer_grid.setHorizontalSpacing(12)
         self.peer_grid.setVerticalSpacing(3)
         self.panel_layout.addLayout(self.peer_grid)
+        self.commend_title = QLabel("上局队友 · 点击名字留言点赞")
+        self.commend_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.panel_layout.addWidget(self.commend_title)
+        self.commend_grid = QGridLayout()
+        self.panel_layout.addLayout(self.commend_grid)
         self._apply_scale(1.0)
         self.setWindowOpacity(0.75)
 
@@ -175,6 +183,44 @@ class P2POverlayWidget(QWidget):
     def set_playtimes(self, playtimes: dict[str, PlaytimeResult]):
         self.playtimes = dict(playtimes)
         self._refresh_rows()
+
+    def set_commend_rows(self, rows):
+        self.commend_rows = list(rows)
+        self._refresh_commend_rows()
+
+    def _request_commend(self, target):
+        if any(r['steam_id'] == target and r['enabled'] for r in self.commend_rows):
+            self.commend_requested.emit(target)
+
+    def _refresh_commend_rows(self):
+        while self.commend_grid.count():
+            item = self.commend_grid.takeAt(0)
+            if item.widget() and not isinstance(item.widget(), SteamProfileLabel):
+                item.widget().deleteLater()
+        old = self._commend_labels
+        self._commend_labels = {}
+        self.commend_title.setVisible(bool(self.commend_rows))
+        self.title_label.setVisible(bool(self.peers) or not self.commend_rows)
+        self.status_label.setVisible(not self.peers and not self.commend_rows)
+        self.commend_title.setStyleSheet(f"color: #66c0f4; font-size: {int(12*self.scale)}px;")
+        for i, row in enumerate(self.commend_rows):
+            target = row['steam_id']
+            label = old.pop(target, None) or SteamProfileLabel(target, self, self._request_commend)
+            label.setText(row['name'])
+            label.setEnabled(row['enabled'])
+            label.setStyleSheet(f"color: {'#66c0f4' if row['enabled'] else '#a0a0a0'}; font-size: {int(13*self.scale)}px;")
+            label.setToolTip(f"{row['status']}\n将发送：{row['comment']}\n同一账号对同一队友默认间隔七天")
+            self._commend_labels[target] = label
+            status = QLabel(row['status'])
+            status.setTextFormat(Qt.TextFormat.PlainText)
+            status.setWordWrap(True)
+            status.setStyleSheet(f"color: #c8c8c8; font-size: {int(11*self.scale)}px;")
+            self.commend_grid.addWidget(label, i*2, 0)
+            self.commend_grid.addWidget(status, i*2+1, 0)
+        for label in old.values():
+            label.hide()
+            label.deleteLater()
+        self.adjustSize()
 
     def set_game_foreground(self, is_foreground: bool):
         self.update_ui_state(P2POverlayUIState(is_game_foreground=is_foreground))
@@ -235,7 +281,7 @@ class P2POverlayWidget(QWidget):
             event.accept()
 
     def timerEvent(self, event):
-        visible = self.enabled and self.status.game_running and self.windowOpacity() > 0.01
+        visible = self.enabled and (self.status.game_running or bool(self.commend_rows)) and self.windowOpacity() > 0.01
         if self.only_show_when_game_foreground:
             visible = visible and (self.is_game_foreground or self.is_menu_opened or self.is_setting_opened)
         if visible and not self.isVisible():
@@ -266,6 +312,7 @@ class P2POverlayWidget(QWidget):
         )
         self._apply_panel_style()
         self._refresh_rows()
+        self._refresh_commend_rows()
 
     def _apply_panel_style(self):
         border = "border: 1px solid rgba(255, 255, 255, 150);" if self.draggable else ""
@@ -301,7 +348,8 @@ class P2POverlayWidget(QWidget):
         self._clear_grid()
         old_names = self._name_labels
         self._name_labels = {}
-        self.status_label.setVisible(not self.peers)
+        self.status_label.setVisible(not self.peers and not self.commend_rows)
+        self.title_label.setVisible(bool(self.peers) or not self.commend_rows)
         legacy_ping_unavailable = any(
             peer.api == "legacy" and peer.ping_ms is None for peer in self.peers
         )

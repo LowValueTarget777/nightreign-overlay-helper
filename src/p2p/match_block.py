@@ -1,7 +1,7 @@
-"""DAY1-gated communication hold; the independent native workers own recovery.
+"""Ping-ready communication hold; independent native workers own recovery.
 
 No HUD/name recognition. Steam friendship is an exclusion, not evidence of how
-the game matched a player. Only recently appearing nonfriends are candidates.
+the game matched a player. Known friends and ambiguous relationships are excluded.
 """
 import time
 
@@ -22,12 +22,10 @@ class MatchBlockController(QObject):
         self.legacy = legacy if legacy is not None else IdentityBridge()
         self.enabled = False
         self.peers = {}
-        self.first_seen = {}
         self.last_snapshot = float('-inf')
-        self.day_one = None
-        self.last_day_one = float('-inf')
         self.attempted = set()
         self.assigned = {}
+        self.departed = set()
         self.message = "自动显示 Steam 名字已关闭"
         self._last_diagnostic = None
         self.timer = QTimer(self)
@@ -50,7 +48,6 @@ class MatchBlockController(QObject):
         if self.enabled == enabled:
             return
         self.enabled = enabled
-        self.day_one = None  # toggling never reuses a previous expedition's permit
         if not enabled:
             for bridge in self.bridges:
                 bridge.restore()
@@ -60,7 +57,10 @@ class MatchBlockController(QObject):
         """Fresh complete native snapshots, including unchanged/empty lists."""
         now = self.clock()
         incoming = {p.steam_id: p for p in peers}
-        self.first_seen = {key: self.first_seen.get(key, now) for key in incoming}
+        self.departed.update(set(self.assigned.values()) - set(incoming))
+        # A failed/completed attempt stays suppressed for this continuous presence.
+        # Departure permits a new attempt on a future encounter, after recovery.
+        self.attempted.intersection_update(set(incoming) | set(self.assigned.values()))
         self.peers = incoming
         self.last_snapshot = now
         self.tick()
@@ -69,20 +69,7 @@ class MatchBlockController(QObject):
         if status.state != "steam_ready":
             # Only a fresh snapshot may renew a hold after helper errors.
             self.last_snapshot = float('-inf')
-            self.day_one = None
             self.tick()
-
-    def on_day_one(self, detected_at):
-        now = self.clock()
-        if not self.enabled or not 0 <= now - detected_at <= 5 or detected_at - self.last_day_one < 120:
-            return
-        # A teammate who stays in the room can remain held across expeditions;
-        # only fresh presence continues that lease. Never submit another block
-        # for a target whose current transaction is still owned by a worker.
-        self.day_one = self.last_day_one = detected_at
-        self.attempted = set(self.assigned.values())
-        info("Match name: DAY1 accepted; waiting for fresh nonfriend peers")
-        self.tick()
 
     def _message(self, value):
         if self.message != value:
@@ -100,12 +87,16 @@ class MatchBlockController(QObject):
             if bridge.status.get("state") in {"idle", "restored", "error"} and not bridge.pending:
                 bridge.authorize_hold("")
                 del self.assigned[index]
+                if target not in self.peers or target in self.departed:
+                    self.attempted.discard(target)
+                self.departed.discard(target)
                 info(f"Match name: slot released slot={index} state={bridge.status.get('state')}")
                 continue
             peer = self.peers.get(target)
             # Steam may report Ignored/Blocked after our block; that isn't a
             # reason to treat a still-connected teammate as a newly found friend.
-            keep = self.enabled and fresh and peer is not None and peer.relationship != 3
+            keep = (self.enabled and fresh and peer is not None and peer.state == 'connected'
+                    and peer.relationship != 3 and target not in self.departed)
             if not keep and bridge.status.get("state") not in {"restoring", "recovery_pending"}:
                 bridge.restore()
             bridge.authorize_hold(target if keep and bridge.status.get("state") in {"preparing", "blocked"} else "")
@@ -116,14 +107,12 @@ class MatchBlockController(QObject):
         recovering = self.legacy.status.get("state") not in {"idle", "restored"} or any(
             b.status.get("state") in {"restoring", "recovery_pending"} for b in self.bridges)
         reason = ('disabled' if not self.enabled else 'stale_peers' if not fresh else
-                  'recovery_pending' if recovering else 'no_day1' if self.day_one is None else
-                  'start_delay' if now - self.day_one < 5 else
-                  'opening_expired' if now - self.day_one > 45 else 'opening_ready')
+                  'recovery_pending' if recovering else 'ping_ready')
         candidates = []
-        if self.enabled and fresh and not recovering and self.day_one is not None and 5 <= now - self.day_one <= 45:
+        if self.enabled and fresh and not recovering:
             candidates = [p for p in self.peers.values() if p.relationship == 0
-                          and p.state == "connected" and p.steam_id not in self.attempted
-                          and self.day_one - 120 <= self.first_seen[p.steam_id] <= self.day_one + 30]
+                          and p.state == "connected" and type(p.ping_ms) is int and p.ping_ms >= 0
+                          and p.steam_id not in self.attempted]
             for peer in candidates:
                 available = next((i for i, b in enumerate(self.bridges)
                                   if i not in self.assigned and b.status.get("accepts_begin")), None)
@@ -151,10 +140,6 @@ class MatchBlockController(QObject):
             message = "；".join(dict.fromkeys(busy))
         elif not self.enabled:
             message = "自动显示 Steam 名字已关闭；无待恢复操作"
-        elif self.day_one is None:
-            message = "已开启：等待 DAY1；好友一律跳过"
-        elif now - self.day_one <= 45:
-            message = "已检测 DAY1，等待开局非好友队友；好友及较早入队者跳过"
         else:
-            message = "本次开局检查结束；无待恢复操作，等待下一次 DAY1"
+            message = "已开启：读到非好友队友有效延迟后尝试屏蔽；好友一律跳过"
         self._message(message)

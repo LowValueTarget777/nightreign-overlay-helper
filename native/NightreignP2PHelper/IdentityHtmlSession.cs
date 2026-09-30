@@ -23,6 +23,7 @@ internal sealed class IdentityHtmlSession : IDisposable
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private bool initialized;
     internal bool BlockSettled { get; private set; }
+    internal bool CommentsReady { get; private set; }
     internal string Profile => "https://steamcommunity.com/profiles/" + target + "/";
 
     internal IdentityHtmlSession(string account, string target, Action tick)
@@ -74,7 +75,7 @@ internal sealed class IdentityHtmlSession : IDisposable
 
     internal IdentityPage Inspect(int timeoutMs = 12000)
     {
-        inspectionToken = Guid.NewGuid().ToString("N"); inspected = null; inspectAt = 0;
+        inspectionToken = Guid.NewGuid().ToString("N"); inspected = null; inspectAt = 0; CommentsReady = false;
         SteamHTMLSurface.LoadURL(verifier, Profile + "?nr_identity=" + inspectionToken, null);
         Pump(() => inspected != null, timeoutMs);
         return inspected ?? throw new TimeoutException("无法核对 Steam 屏蔽状态，请保持 Steam 在线");
@@ -128,6 +129,54 @@ internal sealed class IdentityHtmlSession : IDisposable
     }
 
     internal IdentityReply? WaitBlock(int timeoutMs) => WaitReply(blockToken, timeoutMs);
+
+    internal IdentityReply? PostComment(string text)
+    {
+        EnsureAccount();
+        var token = Guid.NewGuid().ToString("N"); actionTokens.Add(token);
+        // Use the site's own thread URL and defaults. Never export its session ID.
+        // Exactly one POST; a timeout is ambiguous and must not be retried.
+        SteamHTMLSurface.ExecuteJavascript(verifier, $$"""
+            (async function(){
+              const token='{{token}}';
+              const report=(tag,ok)=>document.title='NRIDENT:'+JSON.stringify({token,tag,ok});
+              if(!({{Guard}})){report('comment_precondition',false);return;}
+              const thread=Object.values(window.g_rgCommentThreads||{}).find(t=>
+                t.m_strCommentThreadType==='Profile'&&String(t.m_rgCommentData.owner)==='{{target}}');
+              if(!thread||!thread.m_elTextArea||thread.m_elTextArea.disabled){report('comment_precondition',false);return;}
+              const url=new URL(thread.GetActionURL('post'),location.origin);
+              if(url.origin!=='https://steamcommunity.com'||url.pathname!=='/comment/Profile/post/{{target}}/-1/'){
+                report('comment_precondition',false);return;}
+              try{
+                const params=thread.ParametersWithDefaults({comment:{{JsonSerializer.Serialize(text)}}});
+                const r=await fetch(url.href,{method:'POST',credentials:'same-origin',
+                  headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
+                  body:new URLSearchParams(params).toString()});
+                const data=await r.json();
+                report(data.success?'comment_sent':'comment_rejected',!!data.success);
+              }catch(e){report('comment_unknown',false);}
+            })();
+            """);
+        return WaitReply(token, 20000);
+    }
+
+    internal bool CommentPresent(string text)
+    {
+        var page = Inspect(); // Fresh page, never the previous POST's DOM.
+        if (!page.CorrectAccount) return false;
+        var token = Guid.NewGuid().ToString("N"); actionTokens.Add(token);
+        var miniProfile = (ulong.Parse(account) - 76561197960265728UL).ToString();
+        SteamHTMLSurface.ExecuteJavascript(verifier, $$"""
+            (function(){
+              const normal=s=>String(s||'').replace(/\r\n/g,'\n').trim();
+              const found=({{Guard}})&&Array.from(document.querySelectorAll('.commentthread_comment')).some(c=>
+                c.querySelector('[data-miniprofile="{{miniProfile}}"]')&&
+                normal(c.querySelector('.commentthread_comment_text')?.textContent)===normal({{JsonSerializer.Serialize(text)}}));
+              document.title='NRIDENT:'+JSON.stringify({token:'{{token}}',tag:'comment_verified',ok:!!found});
+            })();
+            """);
+        return WaitReply(token, 3000)?.Ok == true;
+    }
 
     internal void RenewHold()
     {
@@ -186,7 +235,10 @@ internal sealed class IdentityHtmlSession : IDisposable
                       account:({{Guard}})&&location.search==='?nr_identity={{inspectionToken}}'&&!!document.querySelector('#account_pulldown'),
                       block:!!document.querySelector('[onclick*="ConfirmBlock"],a[href*="ConfirmBlock"]'),
                       unblock:!!document.querySelector('[onclick*="ConfirmUnblock"],a[href*="ConfirmUnblock"]'),
-                      friend:!!document.querySelector('[onclick*="RemoveFriend"],a[href*="RemoveFriend"]')});
+                      friend:!!document.querySelector('[onclick*="RemoveFriend"],a[href*="RemoveFriend"]'),
+                      comments:Object.values(window.g_rgCommentThreads||{}).some(t=>
+                        t.m_strCommentThreadType==='Profile'&&String(t.m_rgCommentData.owner)==='{{target}}'
+                        &&t.m_elTextArea&&!t.m_elTextArea.disabled)});
                     """);
             }
             Thread.Sleep(25);
@@ -201,8 +253,11 @@ internal sealed class IdentityHtmlSession : IDisposable
             var token = root.TryGetProperty("token", out var tokenProperty) ? tokenProperty.GetString() ?? "" : "";
             bool Flag(string name) => root.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.True;
             if (x.unBrowserHandle == verifier && token == inspectionToken && Flag("page"))
+            {
                 inspected = new(Flag("account"), Flag("block"), Flag("unblock"), Flag("friend"));
-            else if (x.unBrowserHandle == control)
+                CommentsReady = Flag("comments");
+            }
+            else if (x.unBrowserHandle == control || (x.unBrowserHandle == verifier && actionTokens.Contains(token)))
             {
                 var tag = root.GetProperty("tag").GetString() ?? "unknown";
                 var tokens = root.TryGetProperty("tokens", out var list) && list.ValueKind == JsonValueKind.Array
