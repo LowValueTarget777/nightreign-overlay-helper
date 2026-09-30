@@ -69,8 +69,41 @@ class CommendationTests(unittest.TestCase):
         self.feed(peers())
         self.service.finish_match()
         restarted = CommendationService(recent_path=self.root/'recent.json')
-        try: self.assertEqual([p['steam_id'] for p in restarted.recent], [p.steam_id for p in peers()])
+        try:
+            self.assertEqual([p['steam_id'] for p in restarted.recent], [p.steam_id for p in peers()])
+            restarted.tick()
+            self.assertEqual(restarted._last_rows, [])
         finally: restarted.stop(); restarted.deleteLater()
+    def test_review_only_after_end_and_auto_closes_at_two_minutes(self):
+        self.start()
+        self.assertFalse(self.rows)
+        self.end()
+        self.assertEqual(len(self.rows), 2)
+        self.now += 119
+        self.service.tick()
+        self.assertEqual(len(self.rows), 2)
+        self.now += 1
+        self.service.tick()
+        self.assertEqual(self.rows, [])
+        with patch.object(self.service.process, 'start') as start:
+            self.service.send(peers()[0].steam_id)
+            start.assert_not_called()
+    def test_next_day1_immediately_hides_previous_review(self):
+        self.start()
+        self.now += 1800
+        self.end()
+        self.assertEqual(len(self.rows), 2)
+        self.now += 10
+        self.feed(peers())
+        self.assertEqual(len(self.rows), 2)
+        self.service.on_day_one(self.now)
+        self.assertFalse(self.rows)
+    def test_day1_with_staying_team_does_not_open_previous_review(self):
+        self.start()
+        self.now += 180
+        self.feed(peers())
+        self.service.on_day_one(self.now)
+        self.assertFalse(self.rows)
     def test_day1_before_peer_snapshot_records_first_two_names(self):
         self.service.on_day_one(self.now)
         self.feed(peers())

@@ -113,7 +113,7 @@ if __name__ == "__main__":
     settings_action.triggered.connect(lambda: QTimer.singleShot(0, show_settings))
     menu.addAction(settings_action)
     commend_action = QAction("结束本局 / 显示队友点赞入口")
-    commend_action.triggered.connect(commendation.finish_match)
+    commend_action.triggered.connect(lambda: commendation.finish_match())
     menu.addAction(commend_action)
     quit_action = QAction("退出")
     quit_action.triggered.connect(app.quit)

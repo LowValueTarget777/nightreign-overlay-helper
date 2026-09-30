@@ -606,7 +606,7 @@ class SettingsWindow(QWidget):
         self.commendation_text.textChanged.connect(self.update_commendation_settings)
         self.commendation_checkbox.stateChanged.connect(self.update_commendation_settings)
         layout.addWidget(self.commendation_text)
-        commend_hint = QLabel("每个 Steam 账号对同一队友间隔七天。DAY1 记录本局队友，连接离开后显示上局名字；留在大厅可用右键菜单“结束本局”。仅尝试已开放的主页留言，发送结果不确定时暂停重复发送。")
+        commend_hint = QLabel("每个 Steam 账号对同一队友间隔七天。DAY1 记录本局队友，连接离开后显示点赞区两分钟，下一局开始立即收起；留房可用右键菜单“结束本局”。仅尝试已开放的主页留言，结果不确定时暂停重复发送。")
         commend_hint.setWordWrap(True)
         commend_hint.setStyleSheet("color: gray;")
         layout.addWidget(commend_hint)

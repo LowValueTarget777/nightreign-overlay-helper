@@ -12,6 +12,7 @@ from .identity_bridge import _read_json, _write_json, identity_directory
 from .service import resolve_helper_path
 
 DEFAULT_COMMENT = "+rep 好队友，感谢一起征战黑夜君临！"
+REVIEW_SECONDS = 120
 
 
 def valid_id(value):
@@ -47,6 +48,7 @@ class CommendationService(QObject):
         self.empty_since = None
         self.feedback = {}
         self.busy_target = ''
+        self.review_until = 0.0
         self._response = bytearray()
         self.recent_path = Path(recent_path or get_appdata_path('recent_teammates.json'))
         saved = _read_json(self.recent_path) or {}
@@ -95,13 +97,15 @@ class CommendationService(QObject):
         if not self.enabled or not 0 <= now - detected_at <= 5 or detected_at - self.last_day_one < 120:
             return
         if self.roster:
-            self.finish_match()
+            self.finish_match(show=False)
+        self.review_until = 0.0
+        self._publish()
         self.last_day_one = detected_at
         self.roster = {p.steam_id: dict(steam_id=p.steam_id, name=p.name[:128]) for p in self.peers}
         self._tracking = True
         self.empty_since = None
 
-    def finish_match(self):
+    def finish_match(self, *, show=True):
         """Also exposed as a manual tray action for teams that stay in the lobby."""
         players = list(self.roster.values()) or [dict(steam_id=p.steam_id, name=p.name[:128]) for p in self.peers]
         if players:
@@ -113,6 +117,7 @@ class CommendationService(QObject):
         self.roster = {}
         self._tracking = False
         self.empty_since = None
+        self.review_until = self.clock() + REVIEW_SECONDS if players and show else 0.0
         self._publish()
 
     def tick(self):
@@ -127,7 +132,7 @@ class CommendationService(QObject):
     def _publish(self):
         account = current_steam_account()
         rows = []
-        for p in self.recent if self.enabled else []:
+        for p in self.recent if self.enabled and self.clock() < self.review_until else []:
             target = p['steam_id']
             text = self.feedback.get(target, '点击名字留言点赞')
             can_send = not self.busy_target
@@ -151,7 +156,8 @@ class CommendationService(QObject):
             self.rows_changed.emit(rows)
 
     def send(self, target):
-        if not self.enabled or self.busy_target or not any(p['steam_id'] == target for p in self.recent):
+        if (not self.enabled or self.clock() >= self.review_until or self.busy_target
+                or not any(p['steam_id'] == target for p in self.recent)):
             return
         if not self.comment or len(self.comment) > 500 or '\0' in self.comment:
             self.status_changed.emit('请在设置中填写 1–500 字留言')
