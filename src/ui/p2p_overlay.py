@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 
 from src.logger import info, warning
 from src.p2p.models import P2PPeer, P2PStatus
+from src.p2p.encounters import encounter_text
 from src.p2p.playtime import PlaytimeResult, format_playtime
 from src.ui.utils import set_widget_always_on_top
 
@@ -52,7 +53,7 @@ class SteamProfileLabel(QLabel):
 
     clicked = pyqtSignal(str)
 
-    def __init__(self, steam_id: str, overlay: P2POverlayWidget):
+    def __init__(self, steam_id: str, overlay: P2POverlayWidget, action=None):
         super().__init__()
         self.steam_id = steam_id
         self.overlay = overlay
@@ -60,7 +61,7 @@ class SteamProfileLabel(QLabel):
         self._dragged = False
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clicked.connect(overlay._open_steam_profile, Qt.ConnectionType.QueuedConnection)
+        self.clicked.connect(action or overlay._open_steam_profile, Qt.ConnectionType.QueuedConnection)
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -129,6 +130,7 @@ class P2POverlayWidget(QWidget):
         self.status = P2PStatus("waiting_for_game", "等待 nightreign.exe")
         self.peers: list[P2PPeer] = []
         self.playtimes: dict[str, PlaytimeResult] = {}
+        self.encounter_counts = None
         self._name_labels: dict[str, SteamProfileLabel] = {}
 
         root_layout = QVBoxLayout(self)
@@ -174,6 +176,10 @@ class P2POverlayWidget(QWidget):
 
     def set_playtimes(self, playtimes: dict[str, PlaytimeResult]):
         self.playtimes = dict(playtimes)
+        self._refresh_rows()
+
+    def set_encounter_counts(self, counts):
+        self.encounter_counts = dict(counts) if counts is not None else None
         self._refresh_rows()
 
     def set_game_foreground(self, is_foreground: bool):
@@ -308,6 +314,7 @@ class P2POverlayWidget(QWidget):
         self.legacy_ping_label.setVisible(legacy_ping_unavailable)
         font_size = int(13 * self.scale)
         for row, peer in enumerate(self.peers):
+            row *= 2 if self.encounter_counts is not None else 1
             # Reuse by identity: a periodic ping/playtime update must not destroy
             # the widget between mouse press and release, or change its target.
             name_label = old_names.pop(peer.steam_id, None)
@@ -316,6 +323,12 @@ class P2POverlayWidget(QWidget):
             self._name_labels[peer.steam_id] = name_label
             name_label.setText(peer.name)
             tooltip = f"左键点击：在 Steam 中打开资料页\nSteamID: {peer.steam_id}\nAPI: {peer.api}"
+            count_text = encounter_text(self.encounter_counts, peer.steam_id)
+            if count_text:
+                tooltip += f"\n{count_text}"
+                count_label = QLabel(count_text)
+                count_label.setStyleSheet(f"color: #aebec9; font-size: {int(11 * self.scale)}px;")
+                self.peer_grid.addWidget(count_label, row + 1, 0)
             if peer.api == "legacy" and peer.ping_ms is None:
                 tooltip += "\n旧 Steam P2P 接口没有 Ping/稳定度字段"
             elif peer.api == "legacy":

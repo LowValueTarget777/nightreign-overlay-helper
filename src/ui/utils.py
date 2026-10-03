@@ -38,16 +38,13 @@ def set_widget_always_on_top(widget: QWidget):
 
 def is_window_in_foreground(window_title: str) -> bool:
     """
-    检查包含特定标题的窗口是否在 Windows 的最前面。
+    检查精确标题的游戏窗口是否在 Windows 的最前面。
     """
     try:
         import win32gui
-        import time
+        from src.screencap.hwnd_resolver import is_game_window
         active_window_handle = win32gui.GetForegroundWindow()
-        active_window_title = win32gui.GetWindowText(active_window_handle)
-        if window_title.lower() in active_window_title.lower():
-            return True
-        return False
+        return is_game_window(active_window_handle, window_title)
     except Exception as e:
         return False
 

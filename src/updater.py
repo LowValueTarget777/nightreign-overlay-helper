@@ -64,6 +64,7 @@ class Updater(QObject):
     hp_overlay_ui_state_signal = pyqtSignal(HpOverlayUIState)
     input_block_signals_signal = pyqtSignal(bool)
     game_foreground_changed = pyqtSignal(bool)
+    expedition_started = pyqtSignal(float)
 
     def __init__(
         self, 
@@ -89,6 +90,9 @@ class Updater(QObject):
         self.screencap_mode: ScreencapMode = ScreencapMode.AUTO
         self.only_detect_when_game_foreground: bool = False
         self.detect_interval = 0.2
+        self.match_block_enabled = False
+        self.match_tracking_enabled = False
+        self._match_day1_visible = False
 
         self.input_block_signals_signal.connect(input.blockSignals)
 
@@ -223,7 +227,7 @@ class Updater(QObject):
                     self.phase_start_time = self.get_time()
 
     def detect_and_update_dayx(self):
-        if not self.dayx_detect_enabled:
+        if not self.dayx_detect_enabled and not getattr(self, 'match_tracking_enabled', False):
             return
         param = DetectParam(
             day_detect_param=DayDetectParam(
@@ -232,8 +236,16 @@ class Updater(QObject):
                 hdr_processing_enabled=self.hdr_processing_enabled,
             )
         )
+        captured_at = time.monotonic()
         result = self.detector.detect(param)
-        if result.day_detect_result.start_day1:
+        day1 = bool(result.day_detect_result.start_day1)
+        if getattr(self, 'match_tracking_enabled', False) and getattr(self, '_last_foreground', False):
+            if day1 and not self._match_day1_visible:
+                self.expedition_started.emit(captured_at)
+            self._match_day1_visible = day1
+        if not self.dayx_detect_enabled:
+            return
+        if day1:
             self.start_day1()
         elif result.day_detect_result.start_day2:
             self.start_day2()
@@ -556,6 +568,7 @@ class Updater(QObject):
             if regions != self._auto_regions or message != self._auto_regions_message:
                 self._auto_regions = regions
                 self._auto_regions_message = message
+                info(f"Detection regions: {message}")
                 self.auto_regions_status.emit(message, regions)
                 self.current_is_full_map = False
                 self.set_to_detect_map_pattern_once()

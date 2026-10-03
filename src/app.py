@@ -12,9 +12,13 @@ from src.ui.overlay import OverlayWidget
 from src.ui.map_overlay import MapOverlayWidget
 from src.ui.hp_overlay import HpOverlayWidget
 from src.ui.p2p_overlay import P2POverlayUIState, P2POverlayWidget
+from src.ui.commendation_overlay import CommendationOverlayWidget
 from src.ui.settings import SettingsWindow
 from src.ui.admin_prompt import show_admin_prompt
 from src.p2p import P2PService, SteamPlaytimeService
+from src.p2p.match_block import MatchBlockController
+from src.p2p.commendation import CommendationService
+from src.p2p.encounters import EncounterService
 from src.updater import Updater
 from src.common import APP_FULLNAME, APP_VERSION, ICON_PATH
 from src.logger import info, warning, error
@@ -72,6 +76,7 @@ if __name__ == "__main__":
     map_overlay = MapOverlayWidget()
     hp_overlay = HpOverlayWidget()
     p2p_overlay = P2POverlayWidget()
+    commend_overlay = CommendationOverlayWidget()
     p2p_service = P2PService()
     playtime_service = SteamPlaytimeService()
     p2p_service.status_changed.connect(p2p_overlay.set_status)
@@ -80,15 +85,34 @@ if __name__ == "__main__":
     playtime_service.results_changed.connect(p2p_overlay.set_playtimes)
 
     updater = Updater(input, overlay, map_overlay, hp_overlay)
+    match_block = MatchBlockController()
+    p2p_service.snapshot_received.connect(match_block.set_peers)
+    p2p_service.status_changed.connect(match_block.set_status)
+    commendation = CommendationService(blocker=match_block)
+    p2p_service.snapshot_received.connect(commendation.set_peers)
+    p2p_service.status_changed.connect(commendation.set_status)
+    updater.expedition_started.connect(commendation.on_day_one)
+    commendation.rows_changed.connect(commend_overlay.set_rows)
+    commend_overlay.commend_requested.connect(commendation.send)
+    commend_overlay.dismiss_requested.connect(commendation.dismiss)
+    encounters = EncounterService()
+    p2p_service.snapshot_received.connect(encounters.set_peers)
+    p2p_service.status_changed.connect(encounters.set_status)
+    updater.expedition_started.connect(encounters.on_day_one)
+    encounters.counts_changed.connect(p2p_overlay.set_encounter_counts)
+    encounters.counts_changed.connect(commend_overlay.set_encounter_counts)
     updater.game_foreground_changed.connect(p2p_overlay.set_game_foreground)
+    updater.game_foreground_changed.connect(commend_overlay.set_game_foreground)
     settings_window = SettingsWindow(
-        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service
+        overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service,
+        match_block, commendation, commend_overlay, encounters
     )
     
     # 创建系统托盘图标和菜单
     tray_icon = QSystemTrayIcon()
     tray_icon.setIcon(QIcon(ICON_PATH))
     tray_icon.setToolTip(APP_FULLNAME)
+    match_block.status_changed.connect(lambda text: tray_icon.setToolTip((APP_FULLNAME + "\n" + text)[:127]))
 
     menu = QMenu()
     settings_action = QAction("设置")
@@ -100,6 +124,9 @@ if __name__ == "__main__":
     # activating the settings window.
     settings_action.triggered.connect(lambda: QTimer.singleShot(0, show_settings))
     menu.addAction(settings_action)
+    commend_action = QAction("结束本局 / 显示队友点赞入口")
+    commend_action.triggered.connect(lambda: commendation.finish_match())
+    menu.addAction(commend_action)
     quit_action = QAction("退出")
     quit_action.triggered.connect(app.quit)
     menu.addAction(quit_action)
@@ -116,17 +143,20 @@ if __name__ == "__main__":
         overlay.is_menu_opened = True
         map_overlay.is_menu_opened = True
         p2p_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=True))
+        commend_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=True))
         updater.is_menu_opened = True
         # info("Menu opened")
     def on_menu_hide():
         overlay.is_menu_opened = False
         map_overlay.is_menu_opened = False
         p2p_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=False))
+        commend_overlay.update_ui_state(P2POverlayUIState(is_menu_opened=False))
         updater.is_menu_opened = False
         # info("Menu closed")
 
     overlay.right_click_signal.connect(show_menu_at_cursor_pos)
     p2p_overlay.right_click_signal.connect(show_menu_at_cursor_pos)
+    commend_overlay.right_click_signal.connect(show_menu_at_cursor_pos)
     menu.aboutToShow.connect(on_menu_show)
     menu.aboutToHide.connect(on_menu_hide)
 
@@ -144,11 +174,14 @@ if __name__ == "__main__":
 
     # 设置加载完成后启动，确保联机信息启用状态已经生效。
     p2p_service.start()
+    match_block.start()
 
     # 清理：程序退出时，停止worker并等待线程结束
     def on_quit():
         info("Stopping worker thread...")
         playtime_service.stop()
+        commendation.stop()
+        match_block.stop()
         p2p_service.stop()
         updater.stop()
         input.stop()

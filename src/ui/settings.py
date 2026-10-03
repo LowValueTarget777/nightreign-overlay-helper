@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QSlider, QGroupBox, QCheckBox, QPushButton,
     QMessageBox, QApplication, QFrame, QComboBox, QToolTip, 
-    QLineEdit, QScrollArea, QSpinBox,
+    QLineEdit, QScrollArea, QSpinBox, QPlainTextEdit,
 )
 from PyQt6.QtGui import QDesktopServices, QPixmap, QIcon, QMouseEvent, QEnterEvent
 import yaml
@@ -582,6 +582,54 @@ class SettingsWindow(QWidget):
         self.p2p_enabled_checkbox.stateChanged.connect(self.update_p2p_enabled)
         layout.addWidget(self.p2p_enabled_checkbox)
 
+        self.match_block_checkbox = QCheckBox("读到队友延迟后自动屏蔽通信以显示 Steam 名字")
+        self.match_block_checkbox.setChecked(False)
+        self.match_block_checkbox.stateChanged.connect(self.update_match_block_enabled)
+        layout.addWidget(self.match_block_checkbox)
+        hint = QLabel("好友一律跳过；非好友连接正常且有有效 Ping 即可尝试，无需等待 DAY1。网页准备超时后自动等待重试；持续确认离队 10 秒后解除，短暂重连不解除。关闭开关、退出助手或游戏后请求恢复；断网时保留记录继续重试。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray;")
+        layout.addWidget(hint)
+        self.match_block_status = QLabel("自动显示 Steam 名字已关闭")
+        self.match_block_status.setWordWrap(True)
+        layout.addWidget(self.match_block_status)
+        if self.match_block is not None:
+            self.match_block.status_changed.connect(self.match_block_status.setText)
+
+        from src.p2p.commendation import DEFAULT_COMMENT
+        self.commendation_checkbox = QCheckBox("显示对局后队友留言点赞入口")
+        self.commendation_checkbox.setChecked(True)
+        layout.addWidget(self.commendation_checkbox)
+        layout.addWidget(QLabel("点赞留言（点击点赞窗口的名字才发送，最多 500 字）"))
+        self.commendation_text = QPlainTextEdit(DEFAULT_COMMENT)
+        self.commendation_text.setMaximumHeight(90)
+        self.commendation_text.textChanged.connect(self.update_commendation_settings)
+        self.commendation_checkbox.stateChanged.connect(self.update_commendation_settings)
+        layout.addWidget(self.commendation_text)
+        commend_hint = QLabel("每个 Steam 账号对同一队友间隔七天。DAY1 记录本局队友，谁离开就单独弹出谁的点赞窗口，两分钟后关闭；留房可用右键菜单“结束本局”。下一局收起旧入口，点击才留言。")
+        commend_hint.setWordWrap(True)
+        commend_hint.setStyleSheet("color: gray;")
+        layout.addWidget(commend_hint)
+        self.commendation_status = QLabel("点击点赞窗口的队友名字，发送上方留言")
+        self.commendation_status.setWordWrap(True)
+        layout.addWidget(self.commendation_status)
+        if self.commendation is not None:
+            self.commendation.status_changed.connect(self.commendation_status.setText)
+
+        self.encounters_checkbox = QCheckBox("记录非好友队友的累计匹配次数")
+        self.encounters_checkbox.setChecked(False)
+        self.encounters_checkbox.stateChanged.connect(self.update_encounter_settings)
+        layout.addWidget(self.encounters_checkbox)
+        encounter_hint = QLabel("默认关闭。识别 DAY1 后记录开局非好友，每局同一人只计一次；次数显示在延迟框和点赞窗口，按 SteamID 保存，改名不影响。中途启动未看到 DAY1 不补算，关闭后保留记录。")
+        encounter_hint.setWordWrap(True)
+        encounter_hint.setStyleSheet("color: gray;")
+        layout.addWidget(encounter_hint)
+        self.encounters_status = QLabel("次数记录已关闭，已有记录保留")
+        self.encounters_status.setWordWrap(True)
+        layout.addWidget(self.encounters_status)
+        if self.encounters is not None:
+            self.encounters.status_changed.connect(self.encounters_status.setText)
+
         size_layout = QHBoxLayout()
         size_layout.addWidget(QLabel("悬浮窗大小"))
         self.p2p_size_slider = QSlider(Qt.Orientation.Horizontal)
@@ -832,7 +880,23 @@ class SettingsWindow(QWidget):
             self.playtime_enabled_checkbox.blockSignals(True)
             self.playtime_enabled_checkbox.setChecked(data.get("p2p_playtime_enabled", False))
             self.playtime_enabled_checkbox.blockSignals(False)
+            self.encounters_checkbox.blockSignals(True)
+            self.encounters_checkbox.setChecked(data.get("encounters_enabled", False))
+            self.encounters_checkbox.blockSignals(False)
             self.update_p2p_enabled()
+            self.match_block_checkbox.setChecked(data.get("match_block_enabled", False))
+            self.update_match_block_enabled()
+            self.commendation_checkbox.setChecked(data.get("commendation_enabled", True))
+            self.commendation_text.setPlainText(data.get("commendation_comment", self.commendation_text.toPlainText()))
+            self.update_commendation_settings()
+            self.update_encounter_settings()
+            if self.commend_overlay is not None:
+                x, y = data.get('commendation_x'), data.get('commendation_y')
+                if type(x) is int and type(y) is int:
+                    if QApplication.screenAt(QPoint(x, y)) is not None:
+                        self.commend_overlay.move(x, y)
+                    else:
+                        self.commend_overlay.reset_position()
             self.update_p2p_thresholds()
             self.update_playtime_enabled()
             p2p_x = data.get("p2p_x")
@@ -917,10 +981,16 @@ class SettingsWindow(QWidget):
                 "auto_regions_enabled": self.auto_regions_checkbox.isChecked(),
                 # 队友延迟
                 "p2p_enabled": self.p2p_enabled_checkbox.isChecked(),
+                "match_block_enabled": self.match_block_checkbox.isChecked(),
+                "commendation_enabled": self.commendation_checkbox.isChecked(),
+                "encounters_enabled": self.encounters_checkbox.isChecked(),
+                "commendation_comment": self.commendation_text.toPlainText(),
                 "p2p_size": self.p2p_size_slider.value(),
                 "p2p_opacity": self.p2p_opacity_slider.value(),
                 "p2p_x": self.p2p_overlay.x(),
                 "p2p_y": self.p2p_overlay.y(),
+                "commendation_x": self.commend_overlay.x() if self.commend_overlay is not None else None,
+                "commendation_y": self.commend_overlay.y() if self.commend_overlay is not None else None,
                 "p2p_good_ping": self.p2p_good_ping_spinbox.value(),
                 "p2p_warning_ping": self.p2p_warning_ping_spinbox.value(),
                 "p2p_playtime_enabled": self.playtime_enabled_checkbox.isChecked(),
@@ -1011,6 +1081,10 @@ class SettingsWindow(QWidget):
         p2p_overlay: P2POverlayWidget,
         p2p_service: P2PService,
         playtime_service: SteamPlaytimeService,
+        match_block=None,
+        commendation=None,
+        commend_overlay=None,
+        encounters=None,
     ):
         super().__init__()
         config = Config.get()
@@ -1021,7 +1095,13 @@ class SettingsWindow(QWidget):
         self.p2p_overlay = p2p_overlay
         self.p2p_service = p2p_service
         self.playtime_service = playtime_service
+        self.match_block = match_block
+        self.commendation = commendation
+        self.commend_overlay = commend_overlay
+        self.encounters = encounters
         self.update_p2p_overlay_ui_state_signal.connect(p2p_overlay.update_ui_state)
+        if commend_overlay is not None:
+            self.update_p2p_overlay_ui_state_signal.connect(commend_overlay.update_ui_state)
         self.p2p_service.status_changed.connect(self.update_p2p_status_display)
         self.playtime_service.status_changed.connect(self.update_playtime_status_display)
         self.updater = updater
@@ -1572,8 +1652,40 @@ class SettingsWindow(QWidget):
     def update_p2p_enabled(self, state=None):
         enabled = self.p2p_enabled_checkbox.isChecked()
         self.p2p_service.set_enabled(enabled)
+        self.update_match_block_enabled()
+        self.update_commendation_settings()
+        self.update_encounter_settings()
         self.update_p2p_overlay_ui_state_signal.emit(P2POverlayUIState(enabled=enabled))
         info(f"P2P info enabled: {enabled}")
+
+    def update_match_block_enabled(self, state=None):
+        enabled = self.p2p_enabled_checkbox.isChecked() and self.match_block_checkbox.isChecked()
+        self.updater.match_block_enabled = enabled
+        if self.match_block is not None:
+            self.match_block.set_enabled(enabled)
+
+    def update_commendation_settings(self, *_):
+        if not hasattr(self, 'commendation_text'):
+            return
+        enabled = self.p2p_enabled_checkbox.isChecked() and self.commendation_checkbox.isChecked()
+        self.update_match_tracking()
+        if self.commendation is not None:
+            self.commendation.configure(enabled, self.commendation_text.toPlainText())
+
+    def update_match_tracking(self):
+        counts_enabled = hasattr(self, 'encounters_checkbox') and self.encounters_checkbox.isChecked()
+        self.updater.match_tracking_enabled = self.p2p_enabled_checkbox.isChecked() and (
+            self.commendation_checkbox.isChecked() or counts_enabled)
+
+    def update_encounter_settings(self, state=None):
+        if not hasattr(self, 'encounters_checkbox'):
+            return
+        enabled = self.p2p_enabled_checkbox.isChecked() and self.encounters_checkbox.isChecked()
+        self.update_match_tracking()
+        if self.encounters is not None:
+            self.encounters.configure(enabled)
+        if state is not None:
+            self.save_settings()
 
     def update_p2p_size(self, value):
         self.update_p2p_overlay_ui_state_signal.emit(P2POverlayUIState(scale=value / 100.0))

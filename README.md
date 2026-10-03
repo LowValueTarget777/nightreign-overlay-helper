@@ -14,11 +14,16 @@ Nightreign Overlay Helper is a utility program developed with PyQt6, designed to
 - Displays countdowns for art buffs of certain characters.
 - Displays Nightreign teammate Steam names, ping, and connection stability in a separate overlay.
 - Optionally displays teammates' public Nightreign playtime; left-click a teammate's name to open their profile in the Steam client.
+- Optionally blocks communication with ping-ready nonfriends to show Steam names in game, then restores communication when they leave. Recovery records survive an overlay crash or temporary network failure.
+- Shows a separate two-minute commendation window for departed teammates; clicking a name posts your custom profile comment, with a seven-day interval per player.
+- Optionally records cumulative nonfriend encounters, once per confirmed DAY1 expedition.
+
+See [teammate features and recovery](docs/MATCH_NAMES.md) for settings, limits, and validation status.
 
 ## Build Instructions
 
 #### Prerequisites
-- Windows 7, 8, 10, or 11
+- Windows 10 or 11 (64-bit)
 - Python 3.13
 - .NET 8 SDK (build only; release packages include a self-contained helper)
 
@@ -40,6 +45,8 @@ Double-click `nightreign-overlay-helper.exe` to run the program. Right-click the
 
 ## Safety
 The program recognizes game information through screenshots and reads local Steam connection metadata. It does not modify game data, read/write game memory, inject code, or hook the game/Steam process. ETW events are processed in memory without writing ETL files or displaying/logging peer IP addresses. No third-party tool can guarantee zero anti-cheat risk.
+
+Optional teammate features change Steam communication settings and submit profile comments through Steam's web component. Automatic blocking is disabled by default; comments are sent only when you click a teammate in the commendation window. Pending restoration is saved locally and retried, but requires the original Steam account to be online.
 
 ## Acknowledgements
 
@@ -67,14 +74,19 @@ The program recognizes game information through screenshots and reads local Stea
 - 可选显示队友公开的《黑夜君临》游戏时长，优先免 Key 查询；隐藏或无法访问的资料不保证可查询。
 - 左键点击队友名字，在 Steam 客户端内打开该队友资料页；拖动不会误触，右键仍打开助手菜单。
 - 保留地图处理缓存和后台任务等性能优化；实验性地图信息丢失推断模式已移除。
+- 可选在读到有效 Ping 后自动屏蔽非好友通信，让游戏显示 Steam 名字；连续确认离队后解除。恢复记录独立保存，断网或助手崩溃后继续尝试恢复。
+- 队友离开后显示独立点赞窗口，两分钟自动收起；点击名字发送自定义主页留言，同一账号对同一玩家间隔七天。
+- 可选记录非好友累计匹配次数，确认 DAY1 后按 SteamID 每局计一次，在延迟与点赞窗口显示。
 
-性能优化分支使用区域裁剪、受限缓存和独立地图任务，候选图逐步显示。基准数据、验证范围及复现方法见[性能优化记录](docs/performance.md)。
+队友功能的设置、恢复方法和验收边界见[队友名字与留言点赞](docs/MATCH_NAMES.md)。当前版本 `0.10.10.dev9`；已通过 124 项 Python、53 项原生离线回归，用户反馈基本可用，真实断网与崩溃恢复等专项验收仍待完成。
+
+地图处理使用区域裁剪、受限缓存和独立后台任务，候选图逐步显示。基准数据、验证范围及复现方法见[性能优化记录](docs/performance.md)。
 
 ## 构建
 
 #### 环境要求
 
-- Windows 7、8、10 或 11
+- Windows 10/11（64 位）
 - Python 3.13
 - .NET 8 SDK（仅构建需要，发行包中的 Helper 已自包含运行环境）
 
@@ -98,6 +110,8 @@ The program recognizes game information through screenshots and reads local Stea
 ## 安全性
 
 本程序通过截屏识别游戏画面，并读取本机 Steam 连接元数据；不会修改游戏数据、读写游戏内存、注入代码或 Hook 游戏/Steam 进程。ETW 事件只在内存中处理，不生成 ETL 文件，也不显示或记录玩家 IP。任何第三方工具都无法保证反作弊风险绝对为零。
+
+可选队友功能会通过 Steam 网页组件修改通信屏蔽状态或提交主页留言。自动屏蔽默认关闭，留言只在点击点赞窗口中的名字后发送。未完成的恢复记录保存在本地并重试，需要原 Steam 账号在线才能完成。
 
 ## 声明
 

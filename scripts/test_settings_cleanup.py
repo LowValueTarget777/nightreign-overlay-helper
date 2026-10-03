@@ -60,11 +60,12 @@ class SettingsMigration(unittest.TestCase):
         from src.ui.map_overlay import MapOverlayWidget
         from src.ui.hp_overlay import HpOverlayWidget
         from src.ui.p2p_overlay import P2POverlayWidget
+        from src.ui.commendation_overlay import CommendationOverlayWidget
         from src.p2p import P2PService, SteamPlaytimeService
         from src.updater import Updater
         import src.ui.settings as settings
         app = QApplication.instance() or QApplication([])
-        with TemporaryDirectory(dir='build/settings-cleanup') as directory:
+        with TemporaryDirectory() as directory:
             path = Path(directory) / 'settings.yaml'
             path.write_text(yaml.safe_dump({'partial_map_enabled': True,
                 'map_detect_enabled': True, 'map_pattern_return_topk': 3,
@@ -74,27 +75,58 @@ class SettingsMigration(unittest.TestCase):
                  patch.object(P2PService, 'start'), patch.object(SteamPlaytimeService, 'set_enabled'):
                 input_ = InputWorker()
                 overlay, map_, hp, p2p = OverlayWidget(), MapOverlayWidget(), HpOverlayWidget(), P2POverlayWidget()
+                review = CommendationOverlayWidget()
                 service = P2PService()
                 playtime = SteamPlaytimeService(key_store=Mock(load=lambda: None))
                 updater = Updater(input_, overlay, map_, hp)
-                window = settings.SettingsWindow(overlay, map_, updater, input_, p2p, service, playtime)
+                encounters = Mock()
+                window = settings.SettingsWindow(overlay, map_, updater, input_, p2p, service, playtime, commend_overlay=review, encounters=encounters)
                 try:
                     self.assertTrue(updater.map_detect_enabled)
                     self.assertEqual(updater.map_pattern_return_topk, 3)
                     self.assertEqual(updater.map_region, [100, 120, 750, 750])
                     labels = [w.text() for kind in (QCheckBox, QPushButton) for w in window.findChildren(kind)]
                     self.assertFalse(any('丢失' in text or '推断' in text for text in labels))
+                    self.assertFalse(window.match_block_checkbox.isChecked())
+                    self.assertFalse(updater.match_block_enabled)
+                    self.assertFalse(window.encounters_checkbox.isChecked())
+                    encounters.configure.assert_called_with(False)
+                    window.commendation_checkbox.setChecked(False)
+                    self.assertFalse(updater.match_tracking_enabled)
+                    window.encounters_checkbox.setChecked(True)
+                    self.assertTrue(updater.match_tracking_enabled)
+                    encounters.configure.assert_called_with(True)
+                    self.assertTrue(yaml.safe_load(path.read_text(encoding='utf-8'))['encounters_enabled'])
+                    window.commendation_checkbox.setChecked(True)
+                    window.match_block_checkbox.setChecked(True)
+                    self.assertTrue(updater.match_block_enabled)
+                    window.commendation_text.setPlainText('合作愉快！\n+rep')
+                    self.assertTrue(updater.match_tracking_enabled)
+                    review.move(200, 300)
                     window.save_settings()
                     saved = yaml.safe_load(path.read_text(encoding='utf-8'))
                     self.assertNotIn('partial_map_enabled', saved)
+                    self.assertTrue(saved['match_block_enabled'])
+                    self.assertTrue(saved['commendation_enabled'])
+                    self.assertTrue(saved['encounters_enabled'])
+                    self.assertEqual(saved['commendation_comment'], '合作愉快！\n+rep')
+                    self.assertEqual((saved['commendation_x'], saved['commendation_y']), (200, 300))
                     self.assertEqual(saved['map_pattern_return_topk'], 3)
                     self.assertEqual(saved['map_region'], [100, 120, 750, 750])
                     window.load_settings()
                     self.assertTrue(updater.map_detect_enabled)
+                    self.assertTrue(window.match_block_checkbox.isChecked())
+                    self.assertTrue(window.encounters_checkbox.isChecked())
+                    self.assertEqual(window.commendation_text.toPlainText(), '合作愉快！\n+rep')
+                    self.assertEqual((review.x(), review.y()), (200, 300))
+                    window.p2p_enabled_checkbox.setChecked(False)
+                    self.assertFalse(updater.match_block_enabled)
+                    self.assertFalse(updater.match_tracking_enabled)
+                    encounters.configure.assert_called_with(False)
                 finally:
                     window.close()
                     updater._map_jobs.close()
-                    for w in (overlay, map_, hp, p2p): w.close()
+                    for w in (overlay, map_, hp, p2p, review): w.close()
                     service.stop()
                     playtime.stop()
 

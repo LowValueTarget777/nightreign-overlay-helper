@@ -39,7 +39,7 @@ jobs:
       - name: Build teammate latency helper
         shell: pwsh
         run: |
-          dotnet restore native/NightreignP2PHelper/NightreignP2PHelper.csproj --locked-mode
+          dotnet restore native/NightreignP2PHelper/NightreignP2PHelper.csproj --locked-mode -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false
           dotnet publish native/NightreignP2PHelper/NightreignP2PHelper.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o build/NightreignP2PHelper --no-restore
 
       - name: Verify project version matches tag
@@ -79,6 +79,8 @@ jobs:
           xcopy /E /I /Y "data" "dist\nightreign-overlay-helper\data"
           copy "manual.txt" "dist\nightreign-overlay-helper\manual.txt"
           copy "config.yaml" "dist\nightreign-overlay-helper\config.yaml"
+          New-Item -ItemType Directory -Force "dist\nightreign-overlay-helper\docs" | Out-Null
+          Copy-Item "docs\MATCH_NAMES.md" "dist\nightreign-overlay-helper\docs\MATCH_NAMES.md" -Force
           New-Item -ItemType Directory -Force "dist\nightreign-overlay-helper\bin" | Out-Null
           New-Item -ItemType Directory -Force "dist\nightreign-overlay-helper\third-party" | Out-Null
           Copy-Item "build\NightreignP2PHelper\NightreignP2PHelper.exe" "dist\nightreign-overlay-helper\bin\NightreignP2PHelper.exe"
@@ -90,6 +92,7 @@ jobs:
         shell: pwsh
         run: |
           $requiredFiles = @(
+            "dist\nightreign-overlay-helper\docs\MATCH_NAMES.md",
             "dist\nightreign-overlay-helper\bin\NightreignP2PHelper.exe",
             "dist\nightreign-overlay-helper\bin\amd64\KernelTraceControl.dll",
             "dist\nightreign-overlay-helper\bin\amd64\msdia140.dll",

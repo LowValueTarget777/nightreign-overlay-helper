@@ -19,15 +19,36 @@ else:
 
 
 def find_game_hwnd(title: str) -> int | None:
+    """Select one visible, exact-title game window; never a similarly named folder.
+
+    No process handle or executable-path query is needed (EAC may deny those).
+    Ambiguity fails closed instead of depending on desktop stacking order.
+    """
     if sys.platform != "win32":
         warning(f"find_game_hwnd: non-Windows platform ({sys.platform}), returning None.")
         return None
     try:
-        from src.screencap.maa_win32_screencap import find_window_by_title
-        return find_window_by_title(title)
+        import win32gui
+        matches = []
+        def visit(hwnd, _):
+            if is_game_window(hwnd, title):
+                matches.append(hwnd)
+        win32gui.EnumWindows(visit, None)
+        return matches[0] if len(matches) == 1 else None
     except Exception as e:
         warning(f"find_game_hwnd: failed to find window by title '{title}': {e}")
         return None
+
+
+def is_game_window(hwnd: int, title: str) -> bool:
+    if sys.platform != "win32" or not hwnd:
+        return False
+    try:
+        import win32gui
+        return bool(win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)
+                    and win32gui.GetWindowText(hwnd).casefold() == title.casefold())
+    except Exception:
+        return False
 
 
 def get_client_size(hwnd: int) -> tuple[int, int] | None:

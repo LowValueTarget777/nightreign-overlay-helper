@@ -28,7 +28,7 @@ cd /d "%current_dir%"
 uv sync
 if errorlevel 1 goto build_failed
 
-dotnet restore native\NightreignP2PHelper\NightreignP2PHelper.csproj --locked-mode
+dotnet restore native\NightreignP2PHelper\NightreignP2PHelper.csproj --locked-mode -r win-x64 -p:SelfContained=true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false
 if errorlevel 1 goto build_failed
 dotnet publish native\NightreignP2PHelper\NightreignP2PHelper.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o "build\NightreignP2PHelper" --no-restore
 if errorlevel 1 goto build_failed
@@ -40,6 +40,10 @@ xcopy /E /I /Y "assets" "dist\nightreign-overlay-helper\assets"
 xcopy /E /I /Y "data" "dist\nightreign-overlay-helper\data"
 copy "manual.txt" "dist\nightreign-overlay-helper\manual.txt"
 copy "config.yaml" "dist\nightreign-overlay-helper\config.yaml"
+if errorlevel 1 goto build_failed
+
+if not exist "dist\nightreign-overlay-helper\docs" mkdir "dist\nightreign-overlay-helper\docs"
+copy "docs\MATCH_NAMES.md" "dist\nightreign-overlay-helper\docs\MATCH_NAMES.md"
 if errorlevel 1 goto build_failed
 
 if not exist "dist\nightreign-overlay-helper\bin" mkdir "dist\nightreign-overlay-helper\bin"

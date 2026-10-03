@@ -13,6 +13,23 @@ internal static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        // Recovery must outlive the overlay and must not wait for a game process.
+        if (args.Length == 2 && args[0] == "--match-worker" && int.TryParse(args[1], out var slot))
+            return IdentitySupervisor.Run(slot);
+        if (args.Length == 3 && args[0] == "--match-task" && int.TryParse(args[1], out var taskSlot)
+            && int.TryParse(args[2], out var matchSupervisor) && matchSupervisor > 0)
+            return IdentityWorker.Run(taskSlot, supervisorPid: matchSupervisor);
+        if (args.Length == 2 && args[0] == "--identity-task"
+            && int.TryParse(args[1], out var identitySupervisor) && identitySupervisor > 0)
+            return IdentityWorker.Run(supervisorPid: identitySupervisor);
+        if (args.Contains("--identity-worker"))
+            return IdentitySupervisor.Run();
+        if (args.SequenceEqual(new[] { "--commend" }))
+            return CommendationWorker.Run();
+        if (args.SequenceEqual(new[] { "--commend-check" }))
+            return CommendationWorker.Run(checkOnly: true);
+        if (args.SequenceEqual(new[] { "--identity-inspect" }))
+            return CommendationWorker.Run(inspectOnly: true);
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.InputEncoding = System.Text.Encoding.UTF8;
 
@@ -95,36 +112,38 @@ internal static class Program
         }
 
         EtwPingMonitor? etw = null;
-        string? etwError = null;
-        if (etwEnabled)
-        {
-            Protocol.SetEtwState("starting");
-            try
-            {
-                etw = new EtwPingMonitor();
-                etw.Start();
-                Protocol.SetEtwState("ready");
-            }
-            catch (Exception ex)
-            {
-                etw?.Dispose();
-                etw = null;
-                etwError = ex.Message;
-                Protocol.SetEtwState("error");
-                Protocol.LogError($"ETW latency detection unavailable: {ex}");
-            }
-        }
-
-        Protocol.Status("steam_ready", BuildReadyMessage(etwEnabled, etwError), force: true);
-        var reader = new SteamPeerReader(etw);
-
         try
         {
+            string? etwError = null;
+            if (etwEnabled)
+            {
+                Protocol.SetEtwState("starting");
+                try
+                {
+                    etw = new EtwPingMonitor();
+                    etw.Start();
+                    Protocol.SetEtwState("ready");
+                }
+                catch (Exception ex)
+                {
+                    etw?.Dispose();
+                    etw = null;
+                    etwError = ex.Message;
+                    Protocol.SetEtwState("error");
+                    Protocol.LogError($"ETW latency detection unavailable: {ex}");
+                }
+            }
+
+            Protocol.Status("steam_ready", BuildReadyMessage(etwEnabled, etwError), force: true);
+            var reader = new SteamPeerReader(etw);
+
             while (!cancellationToken.IsCancellationRequested && !game.HasExited)
             {
                 Protocol.Snapshot(reader.ReadPeers());
                 await Delay(cancellationToken);
             }
+            if (!cancellationToken.IsCancellationRequested && game.HasExited)
+                Protocol.Status("game_exited", "黑夜君临已退出", force: true);
         }
         catch (OperationCanceledException)
         {
@@ -138,9 +157,8 @@ internal static class Program
         }
         finally
         {
-            etw?.Dispose();
-            SteamAPI.Shutdown();
-            ReleaseSteamApiLibrary();
+            IdentitySessionCoordinator.ReleaseResources(new Action[] {
+                () => etw?.Dispose(), SteamAPI.Shutdown, ReleaseSteamApiLibrary });
         }
 
         return 0;

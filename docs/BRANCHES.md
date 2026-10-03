@@ -1,12 +1,14 @@
 # 分支与提交索引
 
-整理日期：2026-09-10。下面是本地分支；归档通过改名完成，提交及分叉历史完整保留。
+更新日期：2026-10-03。下面是本地分支；归档通过改名完成，提交及分叉历史完整保留。
 
 ## 日常入口
 
 | 分支 | 用途 | 整理时位置 |
 | --- | --- | --- |
-| `main` | Python 维护主线 | `bcb79c4` 功能提交，随后追加本次整理文档 |
+| `main` | Python 维护主线 | `0.10.10.dev9`；归并本轮队友功能与修复，原有远端历史保留；124 项 Python、53 项原生离线测试，用户反馈基本可用 |
+| `LVT/match-name-block` | 保留本轮原始开发历史 | `091bc22` / `0.10.10.dev9`；从 `bcb79c4` 开始的九次迭代归并到 main，分支仍保留；专项实机边界见 PROJECT_STATUS.md |
+| `LVT/teammate-hud` | 已停止推进的头像左侧 HUD 实验，保留历史 | `0.10.9.dev8` / `b8550a8`；未合入 main |
 | `LVT/stable-python` | 重构前稳定基线 | `41d91b1` |
 | `LVT/experimental/csharp-rewrite` | C# 重构实验 | `eb44e42` |
 
@@ -38,6 +40,8 @@
 
 C# 从 `41d91b1` 分叉：`b704abc` 初版 → `65243d2` 便携运行库补齐 → `eb44e42` 输入消息泵及窗口资源耗尽修复。其代码未合入 Python 主线。
 
+2026-10-03：main 在原远端 `8a96d5e` 后追加归并提交，内容对应原开发分支 `091bc22`；原九次开发提交及 `LVT/match-name-block` 不改写。当前已试用的 dev9 包仍以 `091bc22` 标识构建，主线整理不重新生成运行包。
+
 ## 查看与继续
 
 ```powershell
@@ -66,4 +70,4 @@ git log -3 --oneline LVT/experimental/csharp-rewrite
 - 两个额外工作区 `../nightreign-overlay-helper-6da5940-test`、`../nightreign-overlay-helper-af5240b-test` 都是 detached HEAD，检查时跟踪文件干净，保留作旧版本对照。
 - Python 工作区中可能仍看到被忽略的 `csharp/` 构建残留；是否属于当前版本以 `git ls-files` 为准，不能仅看磁盘目录。
 
-本次未推送远端，也没有改写旧提交。整理前完整引用清单及 bundle 位于 `build/repository-organization/20260910-133717/`。
+2026-09-10 的整理未推送远端，备份位于 `build/repository-organization/20260910-133717/`。2026-10-03 按用户要求同步 fork 主线；本轮整合前 Git bundle 位于 `build/repository-organization/20261001-fork-publish/`，旧分支、标签及提交保持完整。
