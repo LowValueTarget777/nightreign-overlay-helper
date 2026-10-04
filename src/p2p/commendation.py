@@ -173,7 +173,7 @@ class CommendationService(QObject):
             if self.clock() >= p['until']:
                 continue
             target = p['steam_id']
-            text = self.feedback.get(target, '点击名字留言点赞')
+            text = self.feedback.get(target, '点击右侧点赞发送留言')
             can_send = not self.busy_target
             if account:
                 record = _read_json(identity_directory()/'commendations'/f'{account}-{target}.json')

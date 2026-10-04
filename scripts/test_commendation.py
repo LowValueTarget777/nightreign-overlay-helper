@@ -7,7 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch, Mock
 import unittest
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtTest import QTest
 from src.p2p.commendation import CommendationService
 from src.p2p.identity_bridge import _write_json
@@ -184,9 +185,43 @@ class CommendationTests(unittest.TestCase):
             self.service.blocker = Mock(assigned={0: peers()[0].steam_id})
             self.service.send(peers()[0].steam_id)
             start.assert_not_called()
-    def test_real_name_click_is_queued_plain_text_and_sent_once(self):
+    def test_name_opens_correct_profile_during_cooldown_without_sending(self):
         self.start(); self.end()
-        with patch('src.ui.commendation_overlay.set_widget_always_on_top'), patch.object(self.service.process, 'start') as start:
+        _write_json(self.root/'commendations'/f'{ACCOUNT}-{peers()[0].steam_id}.json',
+            dict(state='sent', cooldown_until=(datetime.now(timezone.utc)+timedelta(days=6)).isoformat()))
+        self.service.tick()
+        with patch('src.ui.commendation_overlay.set_widget_always_on_top'), \
+             patch('src.ui.p2p_overlay.QDesktopServices.openUrl', return_value=True) as opened, \
+             patch.object(self.service.process, 'start') as start:
+            widget = CommendationOverlayWidget()
+            try:
+                widget.set_rows(self.rows)
+                widget.set_encounter_counts({peer.steam_id: 3 for peer in peers()})
+                widget.commend_requested.connect(self.service.send)
+                self.app.processEvents()
+                self.assertFalse(widget._commend_buttons[peers()[0].steam_id].isEnabled())
+                for peer in peers():
+                    opened.reset_mock()
+                    label = widget._name_labels[peer.steam_id]
+                    self.assertTrue(label.isEnabled())
+                    self.assertEqual(label.textFormat(), Qt.TextFormat.PlainText)
+                    QTest.mousePress(label, Qt.MouseButton.LeftButton, pos=label.rect().center())
+                    widget.set_encounter_counts({peer.steam_id: 4 for peer in peers()})
+                    self.assertIs(label, widget._name_labels[peer.steam_id])
+                    QTest.mouseRelease(label, Qt.MouseButton.LeftButton, pos=label.rect().center())
+                    opened.assert_not_called()
+                    self.app.processEvents()
+                    opened.assert_called_once()
+                    self.assertEqual(opened.call_args.args[0].toString(), f'steam://url/SteamIDPage/{peer.steam_id}')
+                    start.assert_not_called()
+            finally:
+                widget.close(); widget.deleteLater()
+
+    def test_commend_button_is_queued_preserves_target_and_sends_once(self):
+        self.start(); self.end()
+        with patch('src.ui.commendation_overlay.set_widget_always_on_top'), \
+             patch('src.ui.p2p_overlay.QDesktopServices.openUrl') as opened, \
+             patch.object(self.service.process, 'start') as start:
             widget = CommendationOverlayWidget()
             widget.set_rows(self.rows)
             self.service.rows_changed.connect(widget.set_rows)
@@ -194,11 +229,11 @@ class CommendationTests(unittest.TestCase):
             widget.show(); self.app.processEvents()
             with patch('src.p2p.commendation.resolve_helper_path', return_value=self.root/'helper.exe'):
                 (self.root/'helper.exe').touch()
-                label = widget._name_labels[peers()[0].steam_id]
+                label = widget._commend_buttons[peers()[0].steam_id]
                 self.assertEqual(label.textFormat(), Qt.TextFormat.PlainText)
                 QTest.mousePress(label, Qt.MouseButton.LeftButton, pos=label.rect().center())
                 widget.set_rows(self.rows)
-                self.assertIs(label, widget._name_labels[peers()[0].steam_id])
+                self.assertIs(label, widget._commend_buttons[peers()[0].steam_id])
                 QTest.mouseRelease(label, Qt.MouseButton.LeftButton, pos=label.rect().center())
                 start.assert_not_called()
                 self.app.processEvents()
@@ -206,7 +241,56 @@ class CommendationTests(unittest.TestCase):
                 self.assertEqual(self.service._request['target'], peers()[0].steam_id)
                 self.service.send(peers()[0].steam_id)
                 start.assert_called_once()
+                opened.assert_not_called()
             widget.close(); widget.deleteLater()
+
+    def test_removed_rows_cancel_queued_profile_and_commend_actions(self):
+        self.start(); self.end()
+        with patch('src.ui.commendation_overlay.set_widget_always_on_top'), \
+             patch('src.ui.p2p_overlay.QDesktopServices.openUrl') as opened:
+            widget = CommendationOverlayWidget()
+            try:
+                sent = Mock()
+                widget.commend_requested.connect(sent)
+                widget.set_rows(self.rows)
+                self.app.processEvents()
+                target = peers()[0].steam_id
+                for control in (widget._name_labels[target], widget._commend_buttons[target]):
+                    QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=control.rect().center())
+                widget.set_rows([])
+                self.app.processEvents()
+                opened.assert_not_called()
+                sent.assert_not_called()
+            finally:
+                widget.close(); widget.deleteLater()
+
+    def test_dragging_commend_button_or_right_click_does_not_send(self):
+        self.start(); self.end()
+        with patch('src.ui.commendation_overlay.set_widget_always_on_top'):
+            widget = CommendationOverlayWidget()
+            try:
+                sent, menu = Mock(), Mock()
+                widget.commend_requested.connect(sent)
+                widget.right_click_signal.connect(menu)
+                widget.set_rows(self.rows)
+                self.app.processEvents()
+                button = widget._commend_buttons[peers()[0].steam_id]
+                start = button.rect().center()
+                position = widget.pos()
+                delta = QPoint(QApplication.startDragDistance() + 20, 0)
+                QTest.mousePress(button, Qt.MouseButton.LeftButton, pos=start)
+                self.app.sendEvent(button, QMouseEvent(QEvent.Type.MouseMove, QPointF(start + delta),
+                    QPointF(button.mapToGlobal(start) + delta), Qt.MouseButton.NoButton,
+                    Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+                QTest.mouseRelease(button, Qt.MouseButton.LeftButton, pos=start)
+                self.app.processEvents()
+                self.assertEqual(widget.pos(), position + delta)
+                QTest.mouseClick(button, Qt.MouseButton.RightButton, pos=start)
+                self.app.processEvents()
+                sent.assert_not_called()
+                menu.assert_called_once()
+            finally:
+                widget.close(); widget.deleteLater()
     def test_commendation_has_separate_window_position_close_and_visibility(self):
         from src.ui.p2p_overlay import P2POverlayUIState
         with patch('src.ui.p2p_overlay.set_widget_always_on_top'), patch('src.ui.commendation_overlay.set_widget_always_on_top'):

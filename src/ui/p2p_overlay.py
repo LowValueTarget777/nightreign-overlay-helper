@@ -31,6 +31,20 @@ def get_ping_color(ping_ms: int | None, good_ping: int, warning_ping: int) -> st
     return "#ff6464"
 
 
+def open_steam_profile(steam_id: str, widget: QWidget):
+    # Only accept a SteamID, never a command or a URL supplied by a display name.
+    if (not steam_id.isascii() or not steam_id.isdecimal()
+            or len(steam_id) != 17 or not 0 < int(steam_id) < 2**64):
+        warning("Cannot open Steam profile: invalid SteamID")
+        return
+    if not QDesktopServices.openUrl(QUrl(f"steam://url/SteamIDPage/{steam_id}")):
+        warning("Steam profile URI could not be opened")
+        QToolTip.showText(
+            widget.mapToGlobal(widget.rect().center()),
+            "无法打开 Steam 资料页，请确认 Steam 客户端已安装并登录。", widget,
+        )
+
+
 @dataclass
 class P2POverlayUIState:
     x: int | None = None
@@ -282,20 +296,10 @@ class P2POverlayWidget(QWidget):
 
     @pyqtSlot(str)
     def _open_steam_profile(self, steam_id: str):
-        # Construct only a profile URI, never a command or a URL from a name.
-        if (not steam_id.isascii() or not steam_id.isdecimal()
-                or len(steam_id) != 17 or not 0 < int(steam_id) < 2**64):
-            warning("Cannot open Steam profile: invalid SteamID")
-            return
         if not any(peer.steam_id == steam_id for peer in self.peers):
             return
         # Runs after mouse release, so Steam cannot inherit Qt's mouse grab.
-        if not QDesktopServices.openUrl(QUrl(f"steam://url/SteamIDPage/{steam_id}")):
-            warning("Steam profile URI could not be opened")
-            QToolTip.showText(
-                self.mapToGlobal(self.rect().center()),
-                "无法打开 Steam 资料页，请确认 Steam 客户端已安装并登录。", self,
-            )
+        open_steam_profile(steam_id, self)
 
     def _clear_grid(self):
         while self.peer_grid.count():

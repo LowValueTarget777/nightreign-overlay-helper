@@ -1,8 +1,8 @@
 """Independent, temporary teammate review window; never part of the Ping grid."""
 from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
-from .p2p_overlay import SteamProfileLabel
+from .p2p_overlay import SteamProfileLabel, open_steam_profile
 from src.p2p.encounters import encounter_text
 from .utils import set_widget_always_on_top
 
@@ -23,6 +23,7 @@ class CommendationOverlayWidget(QWidget):
         self.rows = []
         self.encounter_counts = None
         self._name_labels = {}
+        self._commend_buttons = {}
         self._drag_position = None
         self.enabled = True
         self.only_show_when_game_foreground = False
@@ -47,6 +48,7 @@ class CommendationOverlayWidget(QWidget):
         heading.addWidget(self.close_button)
         layout.addLayout(heading)
         self.grid = QGridLayout()
+        self.grid.setColumnStretch(0, 1)
         layout.addLayout(self.grid)
         self.setWindowOpacity(0.85)
         self.setFixedWidth(330)
@@ -58,25 +60,46 @@ class CommendationOverlayWidget(QWidget):
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget() and not isinstance(item.widget(), SteamProfileLabel):
+                item.widget().hide()
                 item.widget().deleteLater()
         old, self._name_labels = self._name_labels, {}
+        old_buttons, self._commend_buttons = self._commend_buttons, {}
         self.title_label.setStyleSheet(f'color: #66c0f4; font-size: {int(12*self.scale)}px;')
         for i, row in enumerate(self.rows):
             target = row['steam_id']
-            label = old.pop(target, None) or SteamProfileLabel(target, self, self._request_commend)
+            label = old.pop(target, None) or SteamProfileLabel(target, self)
             label.setText(row['name'])
-            label.setEnabled(row['enabled'])
-            label.setStyleSheet(f"color: {'#66c0f4' if row['enabled'] else '#a0a0a0'}; font-size: {int(13*self.scale)}px;")
-            label.setToolTip(f"{row['status']}\n将发送：{row['comment']}\n同一账号对同一队友默认间隔七天")
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            label.setStyleSheet(f"color: #66c0f4; font-size: {int(13*self.scale)}px;")
+            label.setToolTip(f"在 Steam 内置浏览器打开个人资料页\n{row['name']}")
             self._name_labels[target] = label
+            # Use the same release/drag protection as names, and keep each
+            # target's action widget alive across status/count refreshes.
+            button = old_buttons.pop(target, None) or SteamProfileLabel(target, self, self._request_commend)
+            button.setText('点赞')
+            button.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            button.setFixedSize(int(76*self.scale), int(28*self.scale))
+            button.setEnabled(row['enabled'])
+            button.setStyleSheet(
+                f"color: {'#66c0f4' if row['enabled'] else '#888'}; font-size: {int(12*self.scale)}px; "
+                "background: #28323c; border: 1px solid #455362; border-radius: 4px;")
+            button.setToolTip(f"{row['status']}\n将发送：{row['comment']}\n同一账号对同一队友默认间隔七天")
+            button.setAccessibleName('留言点赞')
+            self._commend_buttons[target] = button
             count_text = encounter_text(self.encounter_counts, target)
             status = QLabel(f"{count_text} · {row['status']}" if count_text else row['status'])
             status.setTextFormat(Qt.TextFormat.PlainText)
             status.setWordWrap(True)
             status.setStyleSheet(f'color: #c8c8c8; font-size: {int(11*self.scale)}px;')
             self.grid.addWidget(label, i*2, 0)
-            self.grid.addWidget(status, i*2+1, 0)
-        for label in old.values():
+            self.grid.addWidget(button, i*2, 1)
+            self.grid.addWidget(status, i*2+1, 0, 1, 2)
+            # Include new widgets in the layout before sizing the window;
+            # deferred showing would temporarily move an active click target.
+            label.show()
+            button.show()
+            status.show()
+        for label in (*old.values(), *old_buttons.values()):
             label.hide()
             label.deleteLater()
         self.adjustSize()
@@ -89,6 +112,10 @@ class CommendationOverlayWidget(QWidget):
     def _request_commend(self, target):
         if any(r['steam_id'] == target and r['enabled'] for r in self.rows):
             self.commend_requested.emit(target)
+
+    def _open_steam_profile(self, target):
+        if any(r['steam_id'] == target for r in self.rows):
+            open_steam_profile(target, self)
 
     def update_ui_state(self, state):
         # Position belongs to this window, never inherit the latency coordinates.
