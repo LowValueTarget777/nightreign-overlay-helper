@@ -1,10 +1,10 @@
 # 队友名字与留言点赞
 
-当前试用版本 `0.10.10.dev10`，位于 `LVT/commendation-actions`；fork 的 `main` 保持 `0.10.10.dev9`。原开发历史保留在 `LVT/match-name-block`（`091bc22`），从 `bcb79c4` 建立。保留统一延迟框、独立限时点赞窗口和可选累计匹配次数，修复短暂名单/心跳波动误解除及 Steam 游戏状态占用，未使用游戏内存、OCR 或头像左侧 HUD。旧版本验收记录见 PROJECT_STATUS.md。
+当前试用版本 `0.10.10.dev11`，位于 `LVT/status-sound-alerts`；fork 的 `main` 保持 `0.10.10.dev9`。原开发历史保留在 `LVT/match-name-block`（`091bc22`），从 `bcb79c4` 建立。保留统一延迟框、独立限时点赞窗口和可选累计匹配次数，修复短暂名单/心跳波动误解除及 Steam 游戏状态占用，未使用游戏内存、OCR 或头像左侧 HUD。旧版本验收记录见 PROJECT_STATUS.md。
 
 ## 使用
 
-退出旧助手，运行 `dist/nightreign-commendation-actions/nightreign-overlay-helper.exe`。升级时旧组件先恢复并退出，通常空闲一分钟后自动交接；新版检查 `match_hold_v4`，不会复用旧版持有逻辑或覆盖仍在恢复的旧组件状态。设置 → 队友信息可开启“读到队友延迟后自动屏蔽通信以显示 Steam 名字”，首次默认关闭、保存后记忆。
+退出旧助手，运行 `dist/nightreign-status-sound-alerts/nightreign-overlay-helper.exe`。升级时旧组件先恢复并退出，通常空闲一分钟后自动交接；新版检查 `match_hold_v4`，不会复用旧版持有逻辑或覆盖仍在恢复的旧组件状态。设置 → 队友信息可开启“读到队友延迟后自动屏蔽通信以显示 Steam 名字”，首次默认关闭、保存后记忆。
 
 开启后，活动名单新鲜、连接正常、非好友且具有有效非负整数 Ping 即可尝试，不再依赖 DAY1、前台状态或入队时间窗口。在大厅也可以开始处理，游戏里名字切换仍依赖游戏自身进入对局后的行为。
 
@@ -13,6 +13,12 @@ Steam 好友、已屏蔽、未知关系和好友申请中的玩家跳过。当�
 Steam 可把数字资料地址跳到自定义 `/id/` 地址；两种都支持，但同时检查页面目标 SteamID、原账号及新导航令牌，不能只按网址形状操作。
 
 连续新鲜活动名单确认离队十秒后请求解除；短暂空名单、connecting 和缺失 Ping 不立即解除，快照断档重新计时。已屏蔽目标遇到组件报错或名单停更最多宽限三十秒，之后请求恢复。真实游戏退出、功能关闭、退出助手或账号失效仍请求解除；helper 启动/重启的“等待游戏”不等于游戏已退出。活动名单并非游戏房间回调，旧 P2P 会话清理可能延迟；同一人返回时先完成旧恢复再重新判断。
+
+## 通信状态标记
+
+延迟窗口在对应姓名下显示准备屏蔽、已屏蔽、解除中、已解除、失败待重试或恢复待确认等状态；点赞窗口也可看到同一目标的通信状态。以原有执行组件报告为准：提交请求不等于已屏蔽，组件空闲不等于已解除；只有收到解除确认才显示成功。好友跳过、原有屏蔽另行标记，原有屏蔽不由助手自动解除。
+
+队友离开活动名单后，恢复状态继续显示在联机框底部“近期队友”，没有旧 Ping；完成结果最多四项、保留两分钟，待恢复不因两分钟到期消失。真实游戏退出立即隐藏旧 Ping，仍可显示通信恢复；“仅在游戏时显示”以及队友信息总开关仍控制窗口可见性。助手重启可接续旧恢复状态，尚未取得名字时显示 SteamID。
 
 ## 结束后点赞
 
@@ -45,10 +51,10 @@ Steam 可把数字资料地址跳到自定义 `/id/` 地址；两种都支持，
 已纳入 Git 的离线入口：
 
 ```powershell
-python -m unittest scripts.test_p2p_profile_click scripts.test_settings_cleanup scripts.test_performance scripts.test_match_block scripts.test_identity_bridge scripts.test_capture_target scripts.test_commendation scripts.test_encounters
+python -m unittest scripts.test_p2p_profile_click scripts.test_settings_cleanup scripts.test_performance scripts.test_match_block scripts.test_identity_bridge scripts.test_capture_target scripts.test_commendation scripts.test_encounters scripts.test_block_status scripts.test_audio_alerts
 dotnet run --project scripts/identity_native_tests/IdentityRecoveryTests.csproj -c Release
 ```
 
-127 项 Python 离线测试通过，新增覆盖名字按 SteamID 打开主页且不留言、冷却期仍可打开主页、独立点赞按钮只发送一次、刷新保持目标、拖动/右键不误发，以及移除条目后取消已排队动作。设置和窗口离线渲染检查通过。原有计数、重启、文件锁、逐人限时点赞、通信恢复和生命周期覆盖保留。原生组件未修改，沿用 dev9 的相同构建及 53 项原生离线回归；本轮未操作真实 Steam，也未发测试留言。
+173 项 Python 离线测试通过，包含通信状态、双目标独立、旧恢复事务、声音时序与设置迁移；保留 dev10 的名字按 SteamID 打开主页且不留言、冷却期仍可打开主页、独立点赞按钮只发送一次、刷新保持目标、拖动/右键不误发，以及移除条目后取消已排队动作。设置和窗口离线渲染检查通过。原有计数、重启、文件锁、逐人限时点赞、通信恢复和生命周期覆盖保留。原生组件未修改，沿用 dev9 的相同构建及 53 项原生离线回归；本轮未操作真实 Steam，也未发测试留言。
 
-用户此前反馈 dev9 基本可用并同步 fork 主线。新交互的真实游戏验收、双队友持续持有、游戏退出后 Steam 状态、断网/崩溃恢复和累计次数等专项验收仍保留。此前小号单条留言及七天拦截实测不能代替完整游戏流程。dev10 为本地试用包，构建版本和提交记录于包内 build-info.json；未推送或创建正式 Release。
+用户此前反馈 dev9 基本可用并同步 fork 主线。新交互的真实游戏验收、双队友持续持有、游戏退出后 Steam 状态、断网/崩溃恢复和累计次数等专项验收仍保留。此前小号单条留言及七天拦截实测不能代替完整游戏流程。dev11 为本地试用包，构建版本和提交记录于包内 build-info.json；未推送或创建正式 Release。

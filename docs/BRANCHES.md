@@ -6,7 +6,8 @@
 
 | 分支 | 用途 | 整理时位置 |
 | --- | --- | --- |
-| `LVT/commendation-actions` | 当前本地交互试用 | `0.10.10.dev10`；名字打开 Steam 主页，右侧独立点赞按钮；127 项 Python 离线回归，原生复用 dev9，未合入 main 或推送 |
+| `LVT/status-sound-alerts` | 当前本地功能试用 | `0.10.10.dev11`；从 `90c88a8` 继续，通信状态标记及关键节点提示音；173 项 Python 离线回归，原生复用 dev9，未合入 main 或推送 |
+| `LVT/commendation-actions` | 保留点赞操作分离版本 | `0.10.10.dev10`；名字打开 Steam 主页，右侧独立点赞按钮；127 项 Python 离线回归，原生复用 dev9，未合入 main 或推送 |
 | `main` | Python 维护主线 | `0.10.10.dev9`；归并本轮队友功能与修复，原有远端历史保留；124 项 Python、53 项原生离线测试，用户反馈基本可用 |
 | `LVT/match-name-block` | 保留本轮原始开发历史 | `091bc22` / `0.10.10.dev9`；从 `bcb79c4` 开始的九次迭代归并到 main，分支仍保留；专项实机边界见 PROJECT_STATUS.md |
 | `LVT/teammate-hud` | 已停止推进的头像左侧 HUD 实验，保留历史 | `0.10.9.dev8` / `b8550a8`；未合入 main |

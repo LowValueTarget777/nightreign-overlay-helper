@@ -20,7 +20,9 @@ from src.p2p.match_block import MatchBlockController
 from src.p2p.commendation import CommendationService
 from src.p2p.encounters import EncounterService
 from src.updater import Updater
-from src.common import APP_FULLNAME, APP_VERSION, ICON_PATH
+from src.audio_alerts import AudioAlertService
+from src.common import APP_FULLNAME, APP_VERSION, ICON_PATH, GAME_WINDOW_TITLE
+from src.ui.utils import is_window_in_foreground
 from src.logger import info, warning, error
 from src.screencap import get_engine
 
@@ -85,7 +87,14 @@ if __name__ == "__main__":
     playtime_service.results_changed.connect(p2p_overlay.set_playtimes)
 
     updater = Updater(input, overlay, map_overlay, hp_overlay)
+    sound_alerts = AudioAlertService(can_play=lambda: (
+        not updater.is_setting_opened and not updater.is_menu_opened
+        and is_window_in_foreground(GAME_WINDOW_TITLE)
+    ))
+    updater.timer_snapshot.connect(sound_alerts.process_snapshot)
     match_block = MatchBlockController()
+    match_block.peer_statuses_changed.connect(p2p_overlay.set_block_statuses)
+    match_block.peer_statuses_changed.connect(commend_overlay.set_block_statuses)
     p2p_service.snapshot_received.connect(match_block.set_peers)
     p2p_service.status_changed.connect(match_block.set_status)
     commendation = CommendationService(blocker=match_block)
@@ -105,7 +114,7 @@ if __name__ == "__main__":
     updater.game_foreground_changed.connect(commend_overlay.set_game_foreground)
     settings_window = SettingsWindow(
         overlay, map_overlay, updater, input, p2p_overlay, p2p_service, playtime_service,
-        match_block, commendation, commend_overlay, encounters
+        match_block, commendation, commend_overlay, encounters, sound_alerts
     )
     
     # 创建系统托盘图标和菜单
@@ -179,6 +188,7 @@ if __name__ == "__main__":
     # 清理：程序退出时，停止worker并等待线程结束
     def on_quit():
         info("Stopping worker thread...")
+        sound_alerts.stop()
         playtime_service.stop()
         commendation.stop()
         match_block.stop()

@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
     QToolTip,
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
 from src.logger import info, warning
 from src.p2p.models import P2PPeer, P2PStatus
 from src.p2p.encounters import encounter_text
+from src.p2p.block_status import block_status_color
 from src.p2p.playtime import PlaytimeResult, format_playtime
 from src.ui.utils import set_widget_always_on_top
 
@@ -145,6 +147,7 @@ class P2POverlayWidget(QWidget):
         self.peers: list[P2PPeer] = []
         self.playtimes: dict[str, PlaytimeResult] = {}
         self.encounter_counts = None
+        self.block_statuses = {}
         self._name_labels: dict[str, SteamProfileLabel] = {}
 
         root_layout = QVBoxLayout(self)
@@ -173,6 +176,9 @@ class P2POverlayWidget(QWidget):
         self.peer_grid.setHorizontalSpacing(12)
         self.peer_grid.setVerticalSpacing(3)
         self.panel_layout.addLayout(self.peer_grid)
+        self.block_history = QVBoxLayout()
+        self.block_history.setSpacing(3)
+        self.panel_layout.addLayout(self.block_history)
         self._apply_scale(1.0)
         self.setWindowOpacity(0.75)
 
@@ -194,6 +200,10 @@ class P2POverlayWidget(QWidget):
 
     def set_encounter_counts(self, counts):
         self.encounter_counts = dict(counts) if counts is not None else None
+        self._refresh_rows()
+
+    def set_block_statuses(self, statuses):
+        self.block_statuses = dict(statuses)
         self._refresh_rows()
 
     def set_game_foreground(self, is_foreground: bool):
@@ -255,7 +265,11 @@ class P2POverlayWidget(QWidget):
             event.accept()
 
     def timerEvent(self, event):
-        visible = self.enabled and self.status.game_running and self.windowOpacity() > 0.01
+        # Recovery continues after the game exits. Its own footer has no Ping
+        # and must remain reviewable until the controller expires its history.
+        active = {peer.steam_id for peer in self._display_peers()}
+        history = any(target not in active for target in self.block_statuses)
+        visible = self.enabled and (self.status.game_running or history) and self.windowOpacity() > 0.01
         if self.only_show_when_game_foreground:
             visible = visible and (self.is_game_foreground or self.is_menu_opened or self.is_setting_opened)
         if visible and not self.isVisible():
@@ -296,7 +310,7 @@ class P2POverlayWidget(QWidget):
 
     @pyqtSlot(str)
     def _open_steam_profile(self, steam_id: str):
-        if not any(peer.steam_id == steam_id for peer in self.peers):
+        if not any(peer.steam_id == steam_id for peer in self._display_peers()):
             return
         # Runs after mouse release, so Steam cannot inherit Qt's mouse grab.
         open_steam_profile(steam_id, self)
@@ -305,20 +319,24 @@ class P2POverlayWidget(QWidget):
         while self.peer_grid.count():
             item = self.peer_grid.takeAt(0)
             if item.widget() is not None and not isinstance(item.widget(), SteamProfileLabel):
+                item.widget().hide()
                 item.widget().deleteLater()
 
     def _refresh_rows(self):
         self._clear_grid()
         old_names = self._name_labels
         self._name_labels = {}
-        self.status_label.setVisible(not self.peers)
+        peers = self._display_peers()
+        self.status_label.setVisible(not peers)
+        if self.status.state == 'game_exited':
+            self.status_label.setText('游戏已退出 · 等待通信恢复' if any(s.pending for s in self.block_statuses.values()) else '游戏已退出')
         legacy_ping_unavailable = any(
-            peer.api == "legacy" and peer.ping_ms is None for peer in self.peers
+            peer.api == "legacy" and peer.ping_ms is None for peer in peers
         )
         self.legacy_ping_label.setVisible(legacy_ping_unavailable)
         font_size = int(13 * self.scale)
-        for row, peer in enumerate(self.peers):
-            row *= 2 if self.encounter_counts is not None else 1
+        for row, peer in enumerate(peers):
+            row *= 2 if self.encounter_counts is not None or self.block_statuses else 1
             # Reuse by identity: a periodic ping/playtime update must not destroy
             # the widget between mouse press and release, or change its target.
             name_label = old_names.pop(peer.steam_id, None)
@@ -326,13 +344,23 @@ class P2POverlayWidget(QWidget):
                 name_label = SteamProfileLabel(peer.steam_id, self)
             self._name_labels[peer.steam_id] = name_label
             name_label.setText(peer.name)
-            tooltip = f"左键点击：在 Steam 中打开资料页\nSteamID: {peer.steam_id}\nAPI: {peer.api}"
+            name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            tooltip = f"左键点击：在 Steam 中打开资料页\n{peer.name}\nSteamID: {peer.steam_id}\nAPI: {peer.api}"
             count_text = encounter_text(self.encounter_counts, peer.steam_id)
+            block_status = self.block_statuses.get(peer.steam_id)
+            detail_text = ' · '.join(text for text in (count_text, block_status.text if block_status else '') if text)
             if count_text:
                 tooltip += f"\n{count_text}"
-                count_label = QLabel(count_text)
-                count_label.setStyleSheet(f"color: #aebec9; font-size: {int(11 * self.scale)}px;")
-                self.peer_grid.addWidget(count_label, row + 1, 0)
+            if block_status:
+                tooltip += f"\n{block_status.text}\n{block_status.detail}"
+            if detail_text:
+                detail_label = QLabel(detail_text)
+                detail_label.setTextFormat(Qt.TextFormat.PlainText)
+                detail_label.setWordWrap(True)
+                color = block_status_color(block_status.state) if block_status else '#aebec9'
+                detail_label.setStyleSheet(f"color: {color}; font-size: {int(11 * self.scale)}px;")
+                detail_label.setToolTip(block_status.detail if block_status else count_text)
+                self.peer_grid.addWidget(detail_label, row + 1, 0, 1, 4 if self.show_playtime else 3)
             if peer.api == "legacy" and peer.ping_ms is None:
                 tooltip += "\n旧 Steam P2P 接口没有 Ping/稳定度字段"
             elif peer.api == "legacy":
@@ -374,7 +402,37 @@ class P2POverlayWidget(QWidget):
             label.hide()
             label.deleteLater()
         self.peer_grid.setColumnStretch(0, 1)
+        # Include widgets before sizing so periodic refreshes do not briefly
+        # shift existing names while a press/release is in progress.
+        for index in range(self.peer_grid.count()):
+            self.peer_grid.itemAt(index).widget().show()
+        self._refresh_block_history()
         self.adjustSize()
+
+    def _display_peers(self):
+        # The service may publish game exit before clearing its last snapshot.
+        # Once that happens, the old Ping values are no longer live teammates.
+        return [] if self.status.state in {'game_exited', 'disabled'} else self.peers
+
+    def _refresh_block_history(self):
+        while self.block_history.count():
+            widget = self.block_history.takeAt(0).widget()
+            widget.hide()
+            widget.deleteLater()
+        active = {peer.steam_id for peer in self._display_peers()}
+        records = [status for target, status in self.block_statuses.items() if target not in active]
+        records.sort(key=lambda status: (not status.pending, -status.updated_at))
+        for status in records:
+            label = QLabel()
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setStyleSheet(f'color: {block_status_color(status.state)}; font-size: {int(11*self.scale)}px;')
+            name = label.fontMetrics().elidedText(status.name, Qt.TextElideMode.ElideRight,
+                                                  max(40, self.width() - int(90*self.scale)))
+            label.setText(f'近期队友 · {name}\n{status.text}')
+            label.setToolTip(f'{status.name}\nSteamID: {status.steam_id}\n{status.detail}')
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            self.block_history.addWidget(label)
+            label.show()
 
     def reset_position(self):
         screen = QApplication.primaryScreen()

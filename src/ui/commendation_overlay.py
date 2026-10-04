@@ -22,6 +22,7 @@ class CommendationOverlayWidget(QWidget):
         self.scale = 1.0
         self.rows = []
         self.encounter_counts = None
+        self.block_statuses = {}
         self._name_labels = {}
         self._commend_buttons = {}
         self._drag_position = None
@@ -87,10 +88,16 @@ class CommendationOverlayWidget(QWidget):
             button.setAccessibleName('留言点赞')
             self._commend_buttons[target] = button
             count_text = encounter_text(self.encounter_counts, target)
-            status = QLabel(f"{count_text} · {row['status']}" if count_text else row['status'])
+            block_status = self.block_statuses.get(target)
+            detail_text = ' · '.join(text for text in (count_text, row['status']) if text)
+            if block_status:
+                detail_text += f'\n通信：{block_status.text}'
+            status = QLabel(detail_text)
             status.setTextFormat(Qt.TextFormat.PlainText)
             status.setWordWrap(True)
             status.setStyleSheet(f'color: #c8c8c8; font-size: {int(11*self.scale)}px;')
+            if block_status:
+                status.setToolTip(block_status.detail)
             self.grid.addWidget(label, i*2, 0)
             self.grid.addWidget(button, i*2, 1)
             self.grid.addWidget(status, i*2+1, 0, 1, 2)
@@ -107,6 +114,10 @@ class CommendationOverlayWidget(QWidget):
 
     def set_encounter_counts(self, counts):
         self.encounter_counts = dict(counts) if counts is not None else None
+        self.set_rows(self.rows)
+
+    def set_block_statuses(self, statuses):
+        self.block_statuses = dict(statuses)
         self.set_rows(self.rows)
 
     def _request_commend(self, target):

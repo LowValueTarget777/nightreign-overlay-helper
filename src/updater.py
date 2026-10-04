@@ -5,6 +5,7 @@ from PIL import Image
 
 from src.common import GAME_WINDOW_TITLE
 from src.config import Config
+from src.audio_alerts import TimerSnapshot
 from src.screencap.regions import adaptive_regions, detection_region
 from src.logger import info, warning, error
 from src.ui.input import InputWorker
@@ -65,6 +66,7 @@ class Updater(QObject):
     input_block_signals_signal = pyqtSignal(bool)
     game_foreground_changed = pyqtSignal(bool)
     expedition_started = pyqtSignal(float)
+    timer_snapshot = pyqtSignal(object)
 
     def __init__(
         self, 
@@ -101,6 +103,8 @@ class Updater(QObject):
         self.day: int = None
         self.current_phase: Phase = None
         self.phase_start_time: float = None
+        self._audio_day_sequence = 0
+        self._audio_timer_revision = 0
         self.dayx_detect_enabled: bool = True
         self.day1_detect_region = None
         self.dayx_detect_lang: str = "chs"
@@ -148,6 +152,7 @@ class Updater(QObject):
     # =============== Day and Phase Management =============== #
 
     def start_day1(self):
+        self._audio_day_sequence = getattr(self, '_audio_day_sequence', 0) + 1
         self.day = 1
         self.current_phase = Phase.FIRST_CIRCLE_STABLE
         self.phase_start_time = self.get_time()
@@ -155,12 +160,14 @@ class Updater(QObject):
         self.set_to_detect_map_pattern_once()
 
     def start_day2(self):
+        self._audio_day_sequence = getattr(self, '_audio_day_sequence', 0) + 1
         self.day = 2
         self.current_phase = Phase.FIRST_CIRCLE_STABLE
         self.phase_start_time = self.get_time()
         info("Day 2 started.")
 
     def start_day3(self):
+        self._audio_day_sequence = getattr(self, '_audio_day_sequence', 0) + 1
         self.day = 3
         self.current_phase = Phase.NIGHT_BOSS
         self.phase_start_time = self.get_time()
@@ -179,10 +186,12 @@ class Updater(QObject):
 
     def foward_day_by_shortcut(self):
         if self.phase_start_time is not None:
+            self._audio_timer_revision = getattr(self, '_audio_timer_revision', 0) + 1
             self.phase_start_time -= Config.get().foward_day_seconds
 
     def back_day_by_shortcut(self):
         if self.phase_start_time is not None:
+            self._audio_timer_revision = getattr(self, '_audio_timer_revision', 0) + 1
             self.phase_start_time += Config.get().back_day_seconds
 
     def get_phase_progress_text(self) -> tuple[float, str]:
@@ -555,6 +564,36 @@ class Updater(QObject):
         
     # =============== Main Loop =============== #
 
+    def get_timer_snapshot(self, is_game_foreground: bool) -> TimerSnapshot:
+        """Read timers directly; display getters may clear expired art state."""
+        config = Config.get()
+        now = self.get_time()
+        phase = self.current_phase.value if self.current_phase is not None else None
+        phase_remaining = None
+        if self.day in (1, 2) and phase in (0, 1, 2, 3) and self.phase_start_time is not None:
+            phase_remaining = config.day_period_seconds[phase] - (now - self.phase_start_time)
+        rain_remaining = None
+        if self.in_rain_start_time is not None:
+            rain_remaining = config.deadly_nightrain_seconds - (now - self.in_rain_start_time)
+        art_token = None
+        art_remaining = None
+        if self.art_type is not None and self.art_start_time is not None:
+            art_info = config.art_info.get(self.art_type, {})
+            duration = art_info.get("duration", 0)
+            if duration > 0:
+                art_token = (self.art_start_time, self.art_type)
+                art_remaining = duration - max(0, now - self.art_start_time - art_info.get("delay", 0))
+        return TimerSnapshot(
+            observed_at=time.monotonic(), timer_time=now, time_scale=config.time_scale,
+            foreground=is_game_foreground,
+            suspended=self.is_setting_opened or self.is_menu_opened,
+            revision=getattr(self, '_audio_timer_revision', 0),
+            day_token=getattr(self, '_audio_day_sequence', 0), day=self.day,
+            phase=phase, phase_remaining=phase_remaining,
+            rain_token=self.in_rain_start_time, rain_remaining=rain_remaining,
+            art_token=art_token, art_remaining=art_remaining,
+        )
+
     def detect_and_update_all(self):
         if self.auto_regions_enabled:
             try:
@@ -673,6 +712,7 @@ class Updater(QObject):
                     last_detect_time = self.get_time()
 
                 self.update_phase_timer()
+                self.timer_snapshot.emit(self.get_timer_snapshot(is_game_foreground))
                 day_progress, day_text = self.get_phase_progress_text()
                 rain_progress, rain_text = self.get_in_rain_progress_text()
                 art_progress, art_text, art_color = self.get_art_progress_text_color()

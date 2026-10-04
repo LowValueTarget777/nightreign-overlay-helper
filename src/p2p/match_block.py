@@ -9,6 +9,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from src.logger import info
 from .identity_bridge import IdentityBridge
+from .block_status import BlockStatusTracker
 
 _RETRYABLE_PREPARATION = {'browser_start', 'page_timeout', 'page_controls', 'steam_connect', 'prepare_cancelled'}
 DEPARTURE_SECONDS = 10
@@ -16,6 +17,7 @@ SNAPSHOT_GRACE_SECONDS = 30
 
 class MatchBlockController(QObject):
     status_changed = pyqtSignal(str)
+    peer_statuses_changed = pyqtSignal(object)
 
     def __init__(self, parent=None, *, bridges=None, legacy=None, clock=time.monotonic):
         super().__init__(parent)
@@ -37,6 +39,8 @@ class MatchBlockController(QObject):
         self.message = "自动显示 Steam 名字已关闭"
         self._last_diagnostic = None
         self._ticking = False
+        self._block_status = BlockStatusTracker()
+        self._peer_statuses = {}
         self.timer = QTimer(self)
         self.timer.setInterval(250)
         self.timer.timeout.connect(self.tick)
@@ -108,6 +112,15 @@ class MatchBlockController(QObject):
             self.message = value
             self.status_changed.emit(value)
 
+    @property
+    def peer_statuses(self):
+        """Snapshot keyed by SteamID; independent of mutable worker slots."""
+        return dict(self._peer_statuses)
+
+    def _observe_block_status(self, now):
+        for index, bridge in [(-1, self.legacy), *enumerate(self.bridges)]:
+            self._block_status.observe(index, bridge.status, self.assigned.get(index, ''), bridge.pending, now)
+
     def tick(self, *_):
         # Observe durable preparation errors when Bridge publishes them, before
         # the native worker's next idle heartbeat can overwrite the result.
@@ -121,6 +134,7 @@ class MatchBlockController(QObject):
 
     def _tick(self):
         now = self.clock()
+        self._observe_block_status(now)
         fresh = self.snapshot_valid and 0 <= now - self.last_snapshot <= 5
         if not fresh:
             self.missing_since.clear()
@@ -218,3 +232,9 @@ class MatchBlockController(QObject):
             message = (f"网页准备失败，{max(1, int(min(self.retry_at.values())-now))} 秒后自动重试" if self.retry_at else
                        "已开启：读到非好友队友有效延迟后尝试屏蔽；好友一律跳过")
         self._message(message)
+        self._observe_block_status(now)
+        statuses = self._block_status.snapshot(self.peers if not self.game_stopped else {}, enabled=self.enabled,
+            retry_at=self.retry_at, fresh=fresh, recovering=recovering, now=now)
+        if statuses != self._peer_statuses:
+            self._peer_statuses = statuses
+            self.peer_statuses_changed.emit(dict(statuses))

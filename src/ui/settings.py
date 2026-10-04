@@ -812,6 +812,7 @@ class SettingsWindow(QWidget):
         layouts[1].addWidget(self.performance_group)
         layouts[1].addWidget(self.map_detect_group)
         layouts[1].addWidget(self.art_timer_group)
+        layouts[1].addWidget(self.sound_group)
 
         layouts[2].addWidget(self.p2p_group)
         layouts[2].addWidget(self.hp_detect_group)
@@ -830,8 +831,66 @@ class SettingsWindow(QWidget):
         self.update_preset_list_signal.connect(self.preset_dialog.set_preset_names)
         self.update_preset_list()
 
+    def init_sound_group(self):
+        self.sound_group = QGroupBox("声音提醒")
+        layout = QVBoxLayout(self.sound_group)
+        self.sound_enabled_checkbox = QCheckBox("启用关键节点提示音")
+        layout.addWidget(self.sound_enabled_checkbox)
+        self.sound_day_checkbox = QCheckBox("缩圈阶段转换前 30 秒")
+        self.sound_rain_checkbox = QCheckBox("雨中冒险计时剩余 10 秒")
+        self.sound_art_checkbox = QCheckBox("绝招效果剩余 3 秒")
+        for checkbox in (self.sound_day_checkbox, self.sound_rain_checkbox, self.sound_art_checkbox):
+            checkbox.setChecked(True)
+            layout.addWidget(checkbox)
+            checkbox.toggled.connect(self.update_sound_settings)
+        volume_row = QHBoxLayout()
+        volume_row.addWidget(QLabel("音量"))
+        self.sound_volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sound_volume_slider.setRange(0, 100)
+        self.sound_volume_slider.setValue(40)
+        volume_row.addWidget(self.sound_volume_slider, 1)
+        self.sound_volume_label = QLabel("40%")
+        volume_row.addWidget(self.sound_volume_label)
+        self.sound_preview_button = QPushButton("试听")
+        self.sound_preview_button.setToolTip("按当前音量播放一次提示音，不会开启自动提醒")
+        self.sound_preview_button.clicked.connect(self.preview_sound)
+        volume_row.addWidget(self.sound_preview_button)
+        layout.addLayout(volume_row)
+        hint = QLabel("仅在游戏前台提醒，每个节点一次。打开设置或菜单时静音，切回游戏不补播。提醒以助手计时为准。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888;")
+        layout.addWidget(hint)
+        self.sound_feedback_label = QLabel()
+        self.sound_feedback_label.setWordWrap(True)
+        self.sound_feedback_label.setStyleSheet("color: #a06020;")
+        self.sound_feedback_label.hide()
+        layout.addWidget(self.sound_feedback_label)
+        self.sound_enabled_checkbox.toggled.connect(self.update_sound_settings)
+        self.sound_volume_slider.valueChanged.connect(self.update_sound_settings)
+
+    def update_sound_settings(self, *_):
+        enabled = self.sound_enabled_checkbox.isChecked()
+        for checkbox in (self.sound_day_checkbox, self.sound_rain_checkbox, self.sound_art_checkbox):
+            checkbox.setEnabled(enabled)
+        self.sound_volume_label.setText(f"{self.sound_volume_slider.value()}%")
+        if self.sound_alerts is not None:
+            self.sound_alerts.configure(
+                enabled=enabled, day=self.sound_day_checkbox.isChecked(),
+                rain=self.sound_rain_checkbox.isChecked(), art=self.sound_art_checkbox.isChecked(),
+                volume=self.sound_volume_slider.value(),
+            )
+        if not self._loading_sound_settings:
+            self.save_settings()
+
+    def preview_sound(self):
+        if self.sound_alerts is not None:
+            failed = self.sound_alerts.preview() is False and self.sound_volume_slider.value() > 0
+            self.sound_feedback_label.setText("提示音未能播放，请检查音频输出后再次试听。" if failed else "")
+            self.sound_feedback_label.setVisible(failed)
+
 
     def load_settings(self):
+        self._loading_sound_settings = True
         try:
             def load_checkbox_state(checkbox: QCheckBox, state: bool):
                 checkbox.setChecked(not state)
@@ -955,9 +1014,25 @@ class SettingsWindow(QWidget):
             self.auto_regions_checkbox.setChecked(data.get("auto_regions_enabled", True))
             self.auto_regions_checkbox.blockSignals(False)
             self.update_auto_regions()
+            for checkbox, key, default in (
+                (self.sound_enabled_checkbox, "sound_enabled", False),
+                (self.sound_day_checkbox, "sound_day_enabled", True),
+                (self.sound_rain_checkbox, "sound_rain_enabled", True),
+                (self.sound_art_checkbox, "sound_art_enabled", True),
+            ):
+                checkbox.blockSignals(True)
+                checkbox.setChecked(data.get(key, default) is True)
+                checkbox.blockSignals(False)
+            volume = data.get("sound_volume", 40)
+            self.sound_volume_slider.blockSignals(True)
+            self.sound_volume_slider.setValue(max(0, min(100, volume)) if type(volume) is int else 40)
+            self.sound_volume_slider.blockSignals(False)
+            self.update_sound_settings()
             info("Settings loaded successfully")
         except Exception as e:
             error(f"Failed to load settings: {e}")
+        finally:
+            self._loading_sound_settings = False
         info("------------------------")
 
     def save_settings(self):
@@ -979,6 +1054,12 @@ class SettingsWindow(QWidget):
                 "detect_interval": self.detect_interval_combobox.currentText(),
                 "screencap_mode": self.screencap_mode_combobox.currentText(),
                 "auto_regions_enabled": self.auto_regions_checkbox.isChecked(),
+                # 声音提醒
+                "sound_enabled": self.sound_enabled_checkbox.isChecked(),
+                "sound_day_enabled": self.sound_day_checkbox.isChecked(),
+                "sound_rain_enabled": self.sound_rain_checkbox.isChecked(),
+                "sound_art_enabled": self.sound_art_checkbox.isChecked(),
+                "sound_volume": self.sound_volume_slider.value(),
                 # 队友延迟
                 "p2p_enabled": self.p2p_enabled_checkbox.isChecked(),
                 "match_block_enabled": self.match_block_checkbox.isChecked(),
@@ -1085,6 +1166,7 @@ class SettingsWindow(QWidget):
         commendation=None,
         commend_overlay=None,
         encounters=None,
+        sound_alerts=None,
     ):
         super().__init__()
         config = Config.get()
@@ -1099,6 +1181,8 @@ class SettingsWindow(QWidget):
         self.commendation = commendation
         self.commend_overlay = commend_overlay
         self.encounters = encounters
+        self.sound_alerts = sound_alerts
+        self._loading_sound_settings = True
         self.update_p2p_overlay_ui_state_signal.connect(p2p_overlay.update_ui_state)
         if commend_overlay is not None:
             self.update_p2p_overlay_ui_state_signal.connect(commend_overlay.update_ui_state)
@@ -1127,6 +1211,7 @@ class SettingsWindow(QWidget):
         self.init_p2p_group()
         self.init_hp_detect_group()
         self.init_art_timer_group()
+        self.init_sound_group()
 
         self.init_layouts()
 
