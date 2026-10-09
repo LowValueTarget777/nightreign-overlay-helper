@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 import struct
+import tempfile
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
@@ -18,15 +19,17 @@ from src.audio_alerts import AudioAlertService, TimerSnapshot, _WindowsCuePlayer
 
 
 class FakePlayer:
-    def __init__(self):
+    def __init__(self, duration=.36):
         self.played = []
         self.stops = 0
         self.closed = False
         self.threads = []
+        self.duration = duration
 
     def play(self, kind, volume):
         self.played.append((kind, volume))
         self.threads.append(QThread.currentThread())
+        return self.duration
 
     def stop(self):
         self.stops += 1
@@ -231,6 +234,96 @@ class AlertDecisions(unittest.TestCase):
         self.assertGreater(self.player.stops, before)
         self.assertEqual(self.player.played, [("art", 27)])
 
+    def test_long_voice_preview_survives_muted_snapshots_until_its_actual_end(self):
+        self.player.duration = 2.4
+        self.service.configure(enabled=False)
+        self.guard.return_value = False
+        self.assertTrue(self.service.preview())
+        before = self.player.stops
+        for at in (.1, .6, 1.2, 2.3):
+            self.send(at, suspended=True)
+            self.assertEqual(self.player.stops, before)
+        self.send(2.5, suspended=True)
+        self.assertGreater(self.player.stops, before)
+
+    def test_busy_voice_does_not_get_cut_off_or_replay_missed_cues_later(self):
+        self.player.duration = 2.2
+        self.send(0, rain_token=1, rain_remaining=10.1)
+        self.send(.2, rain_token=1, rain_remaining=9.9)
+        self.send(.8, art_token=(1, "x"), art_remaining=3.1)
+        self.send(1, art_token=(1, "x"), art_remaining=2.9)
+        for at in (1.5, 2.1, 2.5):
+            self.send(at, art_token=(1, "x"), art_remaining=3.9 - at)
+        self.assertEqual(self.player.played, [("rain", 40)])
+        self.send(2.7, day_token=1, day=1, phase=0, phase_remaining=30.1)
+        self.send(2.9, day_token=1, day=1, phase=0, phase_remaining=29.9)
+        self.assertEqual(self.player.played, [("rain", 40), ("circle_start", 40)])
+
+    def test_repeated_explicit_preview_can_replace_voice_and_reset_its_protection(self):
+        self.player.duration = 2.2
+        self.assertTrue(self.service.preview())
+        self.now = .8
+        self.assertTrue(self.service.preview("art"))
+        self.guard.return_value = False
+        before = self.player.stops
+        self.send(2.4, suspended=True)
+        self.assertEqual(self.player.stops, before)
+        self.send(3.1, suspended=True)
+        self.assertGreater(self.player.stops, before)
+        self.assertEqual(self.player.played, [("circle_start", 40), ("art", 40)])
+
+    def test_preview_prevents_automatic_cue_from_interrupting_or_queueing(self):
+        self.player.duration = 2.2
+        self.assertTrue(self.service.preview())
+        self.send(.6, rain_token=1, rain_remaining=10.1)
+        self.send(.8, rain_token=1, rain_remaining=9.9)
+        for at in (1.4, 2, 2.5):
+            self.send(at, rain_token=1, rain_remaining=10.7 - at)
+        self.assertEqual(self.player.played, [("circle_start", 40)])
+
+    def test_background_or_current_ui_guard_stops_automatic_voice_immediately(self):
+        self.player.duration = 2.2
+        for token, background in ((1, True), (2, False)):
+            at = token * 3
+            self.guard.return_value = True
+            self.send(at, rain_token=token, rain_remaining=10.1)
+            self.send(at + .2, rain_token=token, rain_remaining=9.9)
+            before = self.player.stops
+            self.now = at + .3
+            self.guard.return_value = background
+            self.service.process_snapshot(TimerSnapshot(at + .3, 1000 + at + .3,
+                foreground=not background, rain_token=token, rain_remaining=9.8))
+            self.assertGreater(self.player.stops, before)
+
+    def test_disable_zero_volume_and_volume_change_cancel_voice_preview(self):
+        self.player.duration = 2.2
+        for options in ({"enabled": False}, {"enabled": True, "volume": 0},
+                        {"enabled": True, "volume": 23}):
+            self.service.configure(enabled=True, volume=40)
+            self.assertTrue(self.service.preview())
+            before = self.player.stops
+            self.service.configure(**options)
+            self.assertGreater(self.player.stops, before)
+            self.assertLess(self.service._playing_until, self.now)
+            self.assertLess(self.service._preview_until, self.now)
+
+    def test_playback_setup_time_is_included_in_voice_busy_window(self):
+        self.player.duration = 1.2
+        original_play = self.player.play
+
+        def delayed_play(kind, volume):
+            self.now += .2
+            return original_play(kind, volume)
+
+        self.player.play = delayed_play
+        self.assertTrue(self.service.preview())
+        self.guard.return_value = False
+        before = self.player.stops
+        self.send(1.3, suspended=True)
+        self.assertEqual(self.player.stops, before)
+        self.send(1.5, suspended=True)
+        self.assertGreater(self.player.stops, before)
+
     def test_device_failure_is_contained_and_explicit_preview_can_retry(self):
         self.player.play = Mock(side_effect=RuntimeError("no device"))
         with patch("src.audio_alerts.warning") as log:
@@ -241,6 +334,7 @@ class AlertDecisions(unittest.TestCase):
             self.assertEqual(log.call_count, 1)
             self.assertEqual(self.player.play.call_count, 1)
             self.player.play.side_effect = None
+            self.player.play.return_value = .36
             self.assertTrue(self.service.preview())
         self.assertEqual(self.player.play.call_count, 2)
 
@@ -262,6 +356,63 @@ class AlertDecisions(unittest.TestCase):
 
 
 class WavAndBackend(unittest.TestCase):
+    @staticmethod
+    def voice_wav(samples, *, rate=24000, channels=1):
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(channels)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            wav.writeframes(struct.pack("<" + "h" * len(samples), *samples))
+        return output.getvalue()
+
+    def test_voice_mapping_preserves_pcm_timing_and_scales_actual_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kinds = ("circle_start", "circle_end", "rain", "art")
+            for index, kind in enumerate(kinds, start=1):
+                samples = [32767, -32768, 1000 * index, -1000 * index] * (6000 * index)
+                (root / (kind + ".wav")).write_bytes(self.voice_wav(samples))
+            player = _WindowsCuePlayer(voice_directory=root)
+            try:
+                with patch("winsound.PlaySound") as play, patch("src.audio_alerts.warning") as log:
+                    for index, kind in enumerate(kinds, start=1):
+                        self.assertEqual(player.play(kind, 40), index)
+                        with wave.open(play.call_args.args[0], "rb") as wav:
+                            self.assertEqual((wav.getnchannels(), wav.getsampwidth(), wav.getframerate()),
+                                             (1, 2, 24000))
+                            self.assertEqual(wav.getnframes(), index * 24000)
+                            self.assertEqual(struct.unpack("<hhhh", wav.readframes(4)),
+                                             (13107, -13107, 400 * index, -400 * index))
+                    self.assertEqual(player.play("art", 0), 4)
+                    with wave.open(play.call_args.args[0], "rb") as wav:
+                        self.assertEqual(set(wav.readframes(wav.getnframes())), {0})
+                    log.assert_not_called()
+            finally:
+                with patch("winsound.PlaySound"):
+                    player.close()
+
+    def test_missing_corrupt_and_unsupported_assets_fall_back_once_per_kind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "circle_end.wav").write_bytes(b"not a WAV")
+            (root / "rain.wav").write_bytes(self.voice_wav([1000] * 100, channels=2))
+            (root / "art.wav").write_bytes(self.voice_wav([1000] * 100)[:-2])
+            player = _WindowsCuePlayer(voice_directory=root)
+            try:
+                with patch("winsound.PlaySound") as play, patch("src.audio_alerts.warning") as log:
+                    for volume in (40, 20):
+                        for kind in ("circle_start", "circle_end", "rain", "art"):
+                            duration = player.play(kind, volume)
+                            self.assertGreater(duration, 0)
+                            self.assertLess(duration, .5)
+                            self.assertEqual(Path(play.call_args.args[0]).read_bytes(), make_cue_wav(kind, volume))
+                    self.assertEqual(log.call_count, 4)
+                    self.assertTrue(all("using a short tone" in call.args[0] for call in log.call_args_list))
+            finally:
+                with patch("winsound.PlaySound"):
+                    player.close()
+
     def test_pcm_volume_silence_short_duration_and_distinct_patterns(self):
         all_waves = []
         for kind in ("circle_start", "circle_end", "rain", "art"):

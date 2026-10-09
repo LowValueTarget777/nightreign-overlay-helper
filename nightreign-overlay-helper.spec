@@ -18,7 +18,10 @@ a = Analysis(
     binaries=qt_vc_runtime + [
         (str(project_root / "native" / "MaaWin32Screencap.dll"), "native"),
     ],
-    datas=[(str(project_root / "pyproject.toml"), ".")],
+    datas=[
+        (str(project_root / "pyproject.toml"), "."),
+        (str(project_root / "assets" / "sounds" / "*.wav"), "assets/sounds"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

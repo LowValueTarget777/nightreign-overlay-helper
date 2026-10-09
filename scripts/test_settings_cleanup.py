@@ -95,8 +95,24 @@ class SettingsMigration(unittest.TestCase):
                     self.assertFalse(window.sound_day_checkbox.isEnabled())
                     sound_alerts.configure.assert_called_with(enabled=False, day=True, rain=True, art=True, volume=40)
                     sound_alerts.preview.assert_not_called()
+                    self.assertTrue(window.sound_preview_combo.isEnabled())
+                    self.assertEqual(window.sound_preview_combo.currentData(), 'circle_start')
                     window.sound_preview_button.click()
-                    sound_alerts.preview.assert_called_once_with()
+                    sound_alerts.preview.assert_called_once_with('circle_start')
+                    configure_count = sound_alerts.configure.call_count
+                    saved_before_preview = path.read_bytes()
+                    self.assertEqual(window.sound_preview_combo.count(), 4)
+                    for index, (label, kind) in enumerate((('缩圈开始', 'circle_start'),
+                            ('缩圈结束', 'circle_end'), ('雨中冒险', 'rain'), ('绝招结束', 'art'))):
+                        with self.subTest(preview=kind):
+                            sound_alerts.preview.reset_mock()
+                            window.sound_preview_combo.setCurrentIndex(index)
+                            self.assertEqual(window.sound_preview_combo.currentText(), label)
+                            sound_alerts.preview.assert_not_called()
+                            window.sound_preview_button.click()
+                            sound_alerts.preview.assert_called_once_with(kind)
+                    self.assertEqual(sound_alerts.configure.call_count, configure_count)
+                    self.assertEqual(path.read_bytes(), saved_before_preview)
                     self.assertFalse(window.sound_enabled_checkbox.isChecked())
                     sound_alerts.preview.return_value = False
                     window.sound_preview_button.click()

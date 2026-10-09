@@ -834,7 +834,7 @@ class SettingsWindow(QWidget):
     def init_sound_group(self):
         self.sound_group = QGroupBox("声音提醒")
         layout = QVBoxLayout(self.sound_group)
-        self.sound_enabled_checkbox = QCheckBox("启用关键节点提示音")
+        self.sound_enabled_checkbox = QCheckBox("启用关键节点语音提醒")
         layout.addWidget(self.sound_enabled_checkbox)
         self.sound_day_checkbox = QCheckBox("缩圈阶段转换前 30 秒")
         self.sound_rain_checkbox = QCheckBox("雨中冒险计时剩余 10 秒")
@@ -851,12 +851,20 @@ class SettingsWindow(QWidget):
         volume_row.addWidget(self.sound_volume_slider, 1)
         self.sound_volume_label = QLabel("40%")
         volume_row.addWidget(self.sound_volume_label)
-        self.sound_preview_button = QPushButton("试听")
-        self.sound_preview_button.setToolTip("按当前音量播放一次提示音，不会开启自动提醒")
-        self.sound_preview_button.clicked.connect(self.preview_sound)
-        volume_row.addWidget(self.sound_preview_button)
         layout.addLayout(volume_row)
-        hint = QLabel("仅在游戏前台提醒，每个节点一次。打开设置或菜单时静音，切回游戏不补播。提醒以助手计时为准。")
+        preview_row = QHBoxLayout()
+        self.sound_preview_combo = QComboBox()
+        for text, kind in (("缩圈开始", "circle_start"), ("缩圈结束", "circle_end"),
+                           ("雨中冒险", "rain"), ("绝招结束", "art")):
+            self.sound_preview_combo.addItem(text, kind)
+        self.sound_preview_combo.setToolTip("选择要试听的语音")
+        preview_row.addWidget(self.sound_preview_combo, 1)
+        self.sound_preview_button = QPushButton("试听")
+        self.sound_preview_button.setToolTip("按当前音量播放所选语音，不会开启自动提醒")
+        self.sound_preview_button.clicked.connect(self.preview_sound)
+        preview_row.addWidget(self.sound_preview_button)
+        layout.addLayout(preview_row)
+        hint = QLabel("仅在游戏前台提醒，每个节点一次。打开设置或菜单时静音，切回游戏不补播。语音播放期间会跳过其他自动提醒，不叠加或排队。提醒以助手计时为准。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888;")
         layout.addWidget(hint)
@@ -884,8 +892,8 @@ class SettingsWindow(QWidget):
 
     def preview_sound(self):
         if self.sound_alerts is not None:
-            failed = self.sound_alerts.preview() is False and self.sound_volume_slider.value() > 0
-            self.sound_feedback_label.setText("提示音未能播放，请检查音频输出后再次试听。" if failed else "")
+            failed = self.sound_alerts.preview(self.sound_preview_combo.currentData()) is False and self.sound_volume_slider.value() > 0
+            self.sound_feedback_label.setText("语音未能播放，请检查音频输出后再次试听。" if failed else "")
             self.sound_feedback_label.setVisible(failed)
 
 

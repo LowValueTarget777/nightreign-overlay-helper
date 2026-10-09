@@ -1,4 +1,4 @@
-"""Short, opt-in timer cues. Timer decisions are independent of audio devices."""
+"""Opt-in timer voice cues. Timer decisions are independent of audio devices."""
 from dataclasses import dataclass
 import io
 import math
@@ -35,13 +35,14 @@ class TimerSnapshot:
 
 # Each pair is (frequency, duration). Zero frequency is a silent gap.
 # Circle starts rise, circle ends fall; rain has three urgent short pulses;
-# an art ending has one longer descending chime. Every cue lasts < 0.5 s.
+# an art ending has one longer descending chime. These fallback tones last < 0.5 s.
 _TONES = {
     "circle_start": ((660, .10), (0, .06), (880, .14)),
     "circle_end": ((880, .10), (0, .06), (660, .14)),
     "rain": ((1046, .07), (0, .055), (1046, .07), (0, .055), (1046, .10)),
     "art": ((880, .10), (660, .10), (440, .16)),
 }
+_VOICE_DIRECTORY = Path(__file__).resolve().parent.parent / "assets" / "sounds"
 
 
 def make_cue_wav(kind: str, volume: int) -> bytes:
@@ -65,19 +66,50 @@ def make_cue_wav(kind: str, volume: int) -> bytes:
     return output.getvalue()
 
 
+def _read_voice_wav(path: Path, volume: int) -> tuple[bytes, float]:
+    """Validate bundled PCM audio and scale its samples without changing timing."""
+    with wave.open(str(path), "rb") as wav:
+        if (wav.getnchannels(), wav.getsampwidth(), wav.getcomptype()) != (1, 2, "NONE"):
+            raise ValueError("voice cue must be uncompressed 16-bit mono WAV")
+        rate = wav.getframerate()
+        frames = wav.getnframes()
+        if rate <= 0 or frames <= 0:
+            raise ValueError("voice cue is empty or has an invalid sample rate")
+        samples = wav.readframes(frames)
+        if len(samples) != frames * 2:
+            raise ValueError("voice cue has truncated PCM samples")
+    gain = max(0, min(100, int(volume))) / 100
+    scaled = bytearray(len(samples))
+    for index, (sample,) in enumerate(struct.iter_unpack("<h", samples)):
+        struct.pack_into("<h", scaled, index * 2, round(sample * gain))
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(scaled)
+    return output.getvalue(), frames / rate
+
+
 class _WindowsCuePlayer:
     """Use process-local asynchronous playback, independent of pygame's lifetime."""
 
-    def __init__(self):
+    def __init__(self, *, voice_directory=None):
         # Delay both OS audio access and temporary files until an actual cue.
         self._directory = None
         self._volume = None
         self._paths = {}
+        self._durations = {}
+        self._voice_directory = Path(voice_directory) if voice_directory is not None else _VOICE_DIRECTORY
+        self._warned_assets = set()
         self._playing = False
 
-    def play(self, kind: str, volume: int):
+    def play(self, kind: str, volume: int) -> float:
+        """Start playback and return the actual WAV duration in wall seconds."""
         import winsound
 
+        if kind not in _TONES:
+            raise ValueError(f"Unknown sound cue: {kind}")
         if self._volume != volume:
             self.stop()
             self._clear_cache()
@@ -86,10 +118,21 @@ class _WindowsCuePlayer:
             self._directory = tempfile.TemporaryDirectory(prefix="nightreign-cues-")
         if kind not in self._paths:
             path = Path(self._directory.name) / (kind + ".wav")
-            path.write_bytes(make_cue_wav(kind, volume))
+            try:
+                data, duration = _read_voice_wav(self._voice_directory / (kind + ".wav"), volume)
+            except (OSError, EOFError, wave.Error, ValueError, struct.error) as exc:
+                if kind not in self._warned_assets:
+                    warning(f"Voice cue {kind} unavailable; using a short tone: {exc}")
+                    self._warned_assets.add(kind)
+                data = make_cue_wav(kind, volume)
+                with wave.open(io.BytesIO(data), "rb") as wav:
+                    duration = wav.getnframes() / wav.getframerate()
+            path.write_bytes(data)
             self._paths[kind] = str(path)
+            self._durations[kind] = duration
         winsound.PlaySound(self._paths[kind], winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
         self._playing = True
+        return self._durations[kind]
 
     def stop(self):
         if self._playing:
@@ -102,6 +145,7 @@ class _WindowsCuePlayer:
             self._directory.cleanup()
             self._directory = None
         self._paths.clear()
+        self._durations.clear()
 
     def close(self):
         self.stop()
@@ -135,6 +179,7 @@ class AudioAlertService(QObject):
         self._consumed = set()
         self._consumed_order = []
         self._last_played_at = -math.inf
+        self._playing_until = -math.inf
         self._preview_until = -math.inf
         self._failed = False
         self._closed = False
@@ -148,6 +193,7 @@ class AudioAlertService(QObject):
     def configure(self, *, enabled=False, day=True, rain=True, art=True, volume=40):
         options = (bool(enabled), bool(day), bool(rain), bool(art))
         previous = (self.enabled, self.day_enabled, self.rain_enabled, self.art_enabled)
+        previous_volume = self.volume
         self.enabled, self.day_enabled, self.rain_enabled, self.art_enabled = options
         try:
             self.volume = max(0, min(100, int(volume)))
@@ -158,7 +204,7 @@ class AudioAlertService(QObject):
             self._previous_allowed = False
         if self.enabled and not previous[0]:
             self._failed = False
-        if not self.enabled or self.volume == 0:
+        if not self.enabled or self.volume == 0 or self.volume != previous_volume:
             self._stop_playback()
 
     @staticmethod
@@ -238,7 +284,8 @@ class AudioAlertService(QObject):
                 candidates.append(kind)
         # No queue and no overlapping pile-up: rain takes priority over an art
         # ending, then the more distant circle warning. All events are consumed.
-        if candidates and now - self._last_played_at >= self.MIN_CUE_INTERVAL:
+        if (candidates and now >= self._playing_until
+                and now - self._last_played_at >= self.MIN_CUE_INTERVAL):
             kind = min(candidates, key=lambda cue: {"rain": 0, "art": 1}.get(cue, 2))
             self._play(kind, now)
 
@@ -246,8 +293,13 @@ class AudioAlertService(QObject):
         if self._closed or self._failed or self.volume <= 0:
             return False
         try:
-            self._player.play(kind, self.volume)
-            self._last_played_at = now
+            duration = float(self._player.play(kind, self.volume))
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("audio backend returned an invalid cue duration")
+            # WAV loading/scaling can take time. Count from completed playback
+            # setup rather than the snapshot's earlier timestamp.
+            self._last_played_at = max(now, self._clock())
+            self._playing_until = self._last_played_at + duration
             return True
         except Exception as exc:
             self._failed = True
@@ -261,10 +313,14 @@ class AudioAlertService(QObject):
         # A deliberate retry permits recovery after an audio device reappears.
         self._failed = False
         now = self._clock()
-        self._preview_until = now + .5
-        return self._play(kind, now)
+        played = self._play(kind, now)
+        if played:
+            self._preview_until = self._playing_until
+        return played
 
     def _stop_playback(self):
+        self._playing_until = -math.inf
+        self._preview_until = -math.inf
         try:
             self._player.stop()
         except Exception as exc:
