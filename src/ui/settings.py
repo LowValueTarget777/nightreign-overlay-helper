@@ -835,6 +835,7 @@ class SettingsWindow(QWidget):
         self.sound_group = QGroupBox("声音提醒")
         layout = QVBoxLayout(self.sound_group)
         self.sound_enabled_checkbox = QCheckBox("启用关键节点语音提醒")
+        self.sound_enabled_checkbox.setChecked(True)
         layout.addWidget(self.sound_enabled_checkbox)
         self.sound_day_checkbox = QCheckBox("缩圈阶段转换前 30 秒")
         self.sound_rain_checkbox = QCheckBox("雨中冒险计时剩余 10 秒")
@@ -1023,7 +1024,7 @@ class SettingsWindow(QWidget):
             self.auto_regions_checkbox.blockSignals(False)
             self.update_auto_regions()
             for checkbox, key, default in (
-                (self.sound_enabled_checkbox, "sound_enabled", False),
+                (self.sound_enabled_checkbox, "sound_enabled", True),
                 (self.sound_day_checkbox, "sound_day_enabled", True),
                 (self.sound_rain_checkbox, "sound_rain_enabled", True),
                 (self.sound_art_checkbox, "sound_art_enabled", True),

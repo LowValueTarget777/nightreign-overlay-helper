@@ -12,7 +12,7 @@ Nightreign Overlay Helper is a utility program developed with PyQt6, designed to
 - Map recognition and floating map information.
 - Displays health percentage markers corresponding to "trigger when health is low" and "trigger when health is full" entries.
 - Displays countdowns for art buffs of certain characters.
-- Optional offline voice reminders with separate category switches, volume and four preview choices; disabled by default, with no overlapping speech or overdue cues after returning to the game.
+- Optional offline voice reminders with separate category switches, volume and four preview choices; enabled by default for new settings, preserving saved opt-outs, with no overlapping speech or overdue cues after returning to the game.
 - Displays Nightreign teammate Steam names, ping, and connection stability in a separate overlay.
 - Optionally displays teammates' public Nightreign playtime; left-click a teammate's name to open their profile in the Steam client.
 - Optionally blocks communication with ping-ready nonfriends to show Steam names in game, then restores communication when they leave. Recovery records survive an overlay crash or temporary network failure.
@@ -68,7 +68,7 @@ Optional teammate features change Steam communication settings and submit profil
 ## 功能
 
 - 显示缩圈和雨中冒险倒计时，支持快捷键触发或自动检测。
-- 可选关键节点语音：缩圈阶段转换前 30 秒、雨中冒险计时剩余 10 秒、绝招效果剩余 3 秒；独立开关、音量及四种语音试听，默认关闭。语音随程序提供，离线播放，无需 API Key；播放期间不插播或积压其他节点。
+- 可选关键节点语音：缩圈阶段转换前 30 秒、雨中冒险计时剩余 10 秒、绝招效果剩余 3 秒；独立开关、音量及四种语音试听，首次默认开启，保留已保存的关闭设置。语音随程序提供，离线播放，无需 API Key；播放期间不插播或积压其他节点。
 - 地图识别与地图信息悬浮。
 - 显示“血量较低触发”与“满血时触发”的词条对应百分比血量位置标记。
 - 显示部分角色的绝招buff倒计时。
@@ -82,7 +82,7 @@ Optional teammate features change Steam communication settings and submit profil
 - 队友离开后显示独立点赞窗口，两分钟自动收起；点击名字打开 Steam 主页，点击右侧点赞按钮发送自定义主页留言，同一账号对同一玩家间隔七天。
 - 可选记录非好友累计匹配次数，确认 DAY1 后按 SteamID 每局计一次，在延迟与点赞窗口显示。
 
-队友功能的设置、恢复方法和验收边界见[队友名字与留言点赞](docs/MATCH_NAMES.md)。当前试用版本 `0.10.10.dev12`；已通过 182 项 Python 离线回归，原生组件未改，沿用 dev9 的 53 项离线回归。dev9 用户反馈基本可用；通信状态实机展示、语音实际播放与游戏触发及真实断网与崩溃恢复等专项验收仍待完成。
+队友功能的设置、恢复方法和验收边界见[队友名字与留言点赞](docs/MATCH_NAMES.md)。当前试用版本 `0.10.10.dev13`；本轮 42 项设置/语音离线回归通过，其余沿用 dev12 的 182 项完整回归结果，原生组件未改，沿用 dev9 的 53 项离线回归。dev9 用户反馈基本可用；通信状态实机展示、语音实际播放与游戏触发及真实断网与崩溃恢复等专项验收仍待完成。
 
 地图处理使用区域裁剪、受限缓存和独立后台任务，候选图逐步显示。基准数据、验证范围及复现方法见[性能优化记录](docs/performance.md)。
 
